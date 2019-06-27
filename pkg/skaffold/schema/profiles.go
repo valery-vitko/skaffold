@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,45 +18,186 @@ package schema
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 
+	cfg "github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
+	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
+	yamlpatch "github.com/krishicks/yaml-patch"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	yaml "gopkg.in/yaml.v2"
 )
 
 // ApplyProfiles returns configuration modified by the application
 // of a list of profiles.
-func ApplyProfiles(c *latest.SkaffoldPipeline, profiles []string) error {
+func ApplyProfiles(c *latest.SkaffoldConfig, opts *cfg.SkaffoldOptions) error {
 	byName := profilesByName(c.Profiles)
+
+	profiles, err := activatedProfiles(c.Profiles, opts)
+	if err != nil {
+		return errors.Wrap(err, "finding auto-activated profiles")
+	}
+
 	for _, name := range profiles {
 		profile, present := byName[name]
 		if !present {
 			return fmt.Errorf("couldn't find profile %s", name)
 		}
 
-		applyProfile(c, profile)
-	}
-	if err := c.SetDefaultValues(); err != nil {
-		return errors.Wrap(err, "applying default values")
+		if err := applyProfile(c, profile); err != nil {
+			return errors.Wrapf(err, "applying profile %s", name)
+		}
 	}
 
 	return nil
 }
 
-func applyProfile(config *latest.SkaffoldPipeline, profile latest.Profile) {
+func activatedProfiles(profiles []latest.Profile, opts *cfg.SkaffoldOptions) ([]string, error) {
+	activated := opts.Profiles
+
+	// Auto-activated profiles
+	for _, profile := range profiles {
+		for _, cond := range profile.Activation {
+			command := isCommand(cond.Command, opts)
+
+			env, err := isEnv(cond.Env)
+			if err != nil {
+				return nil, err
+			}
+
+			kubeContext, err := isKubeContext(cond.KubeContext)
+			if err != nil {
+				return nil, err
+			}
+
+			if command && env && kubeContext {
+				activated = append(activated, profile.Name)
+			}
+		}
+	}
+
+	return activated, nil
+}
+
+func isEnv(env string) (bool, error) {
+	if env == "" {
+		return true, nil
+	}
+
+	keyValue := strings.SplitN(env, "=", 2)
+	if len(keyValue) != 2 {
+		return false, fmt.Errorf("invalid env variable format: %s, should be KEY=VALUE", env)
+	}
+
+	key := keyValue[0]
+	value := keyValue[1]
+
+	return satisfies(value, os.Getenv(key)), nil
+}
+
+func isCommand(command string, opts *cfg.SkaffoldOptions) bool {
+	if command == "" {
+		return true
+	}
+
+	return satisfies(command, opts.Command)
+}
+
+func isKubeContext(kubeContext string) (bool, error) {
+	if kubeContext == "" {
+		return true, nil
+	}
+
+	currentKubeConfig, err := kubectx.CurrentConfig()
+	if err != nil {
+		return false, errors.Wrap(err, "getting current cluster context")
+	}
+
+	return satisfies(kubeContext, currentKubeConfig.CurrentContext), nil
+}
+
+func satisfies(expected, actual string) bool {
+	if strings.HasPrefix(expected, "!") {
+		return actual != expected[1:]
+	}
+	return actual == expected
+}
+
+func applyProfile(config *latest.SkaffoldConfig, profile latest.Profile) error {
 	logrus.Infof("applying profile: %s", profile.Name)
 
 	// this intentionally removes the Profiles field from the returned config
-	*config = latest.SkaffoldPipeline{
+	*config = latest.SkaffoldConfig{
 		APIVersion: config.APIVersion,
 		Kind:       config.Kind,
-		Build:      overlayProfileField(config.Build, profile.Build).(latest.BuildConfig),
-		Deploy:     overlayProfileField(config.Deploy, profile.Deploy).(latest.DeployConfig),
-		Test:       overlayProfileField(config.Test, profile.Test).(latest.TestConfig),
+		Pipeline: latest.Pipeline{
+			Build:  overlayProfileField(config.Build, profile.Build).(latest.BuildConfig),
+			Deploy: overlayProfileField(config.Deploy, profile.Deploy).(latest.DeployConfig),
+			Test:   overlayProfileField(config.Test, profile.Test).([]*latest.TestCase),
+		},
 	}
+
+	if len(profile.Patches) == 0 {
+		return nil
+	}
+
+	// Apply profile patches
+	buf, err := yaml.Marshal(*config)
+	if err != nil {
+		return err
+	}
+
+	var patches []yamlpatch.Operation
+	for _, patch := range profile.Patches {
+		// Default patch operation to `replace`
+		op := patch.Op
+		if op == "" {
+			op = "replace"
+		}
+
+		var value *yamlpatch.Node
+		if v := patch.Value; v != nil {
+			value = &v.Node
+		}
+
+		patch := yamlpatch.Operation{
+			Op:    yamlpatch.Op(op),
+			Path:  yamlpatch.OpPath(patch.Path),
+			From:  yamlpatch.OpPath(patch.From),
+			Value: value,
+		}
+
+		if !tryPatch(patch, buf) {
+			return fmt.Errorf("invalid path: %s", patch.Path)
+		}
+
+		patches = append(patches, patch)
+	}
+
+	buf, err = yamlpatch.Patch(patches).Apply(buf)
+	if err != nil {
+		return err
+	}
+
+	return yaml.Unmarshal(buf, config)
+}
+
+// tryPatch is here to verify patches one by one before we
+// apply them because yamlpatch.Patch is known to panic when a path
+// is not valid.
+func tryPatch(patch yamlpatch.Operation, buf []byte) (valid bool) {
+	defer func() {
+		if errPanic := recover(); errPanic != nil {
+			valid = false
+		}
+	}()
+
+	_, err := yamlpatch.Patch([]yamlpatch.Operation{patch}).Apply(buf)
+	return err == nil
 }
 
 func profilesByName(profiles []latest.Profile) map[string]latest.Profile {
@@ -110,7 +251,7 @@ func overlayProfileField(config interface{}, profile interface{}) interface{} {
 	switch v.Kind() {
 	case reflect.Struct:
 		// check the first field of the struct for a oneOf yamltag.
-		if isOneOf(t.Field(0)) {
+		if util.IsOneOfField(t.Field(0)) {
 			return overlayOneOfField(config, profile)
 		}
 		return overlayStructField(config, profile)
@@ -120,19 +261,14 @@ func overlayProfileField(config interface{}, profile interface{}) interface{} {
 			return config
 		}
 		return v.Interface()
+	case reflect.Ptr:
+		// either return the values provided in the profile, or the original values if none were provided.
+		if v.IsNil() {
+			return config
+		}
+		return v.Interface()
 	default:
 		logrus.Warnf("unknown field type in profile overlay: %s. falling back to original config values", v.Kind())
 		return config
 	}
-}
-
-func isOneOf(field reflect.StructField) bool {
-	for _, tag := range strings.Split(field.Tag.Get("yamltags"), ",") {
-		tagParts := strings.Split(tag, "=")
-
-		if tagParts[0] == "oneOf" {
-			return true
-		}
-	}
-	return false
 }

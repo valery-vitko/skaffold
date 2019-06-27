@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,50 +23,23 @@ import (
 )
 
 func TestGenerateFullyQualifiedImageName(t *testing.T) {
-	var tests = []struct {
-		description string
-		opts        *Options
-		digest      string
-		image       string
-		expected    string
+	c := &ChecksumTagger{}
 
-		shouldErr bool
-	}{
-		{
-			description: "no error",
-			opts: &Options{
-				ImageName: "test",
-				Digest:    "sha256:12345abcde",
-			},
-			expected: "test:12345abcde",
-		},
-		{
-			description: "wrong digest format",
-			opts: &Options{
-				ImageName: "test",
-				Digest:    "wrong:digest:format",
-			},
-			shouldErr: true,
-		},
-		{
-			description: "wrong digest format no colon",
-			opts: &Options{
-				ImageName: "test",
-				Digest:    "sha256",
-			},
-			shouldErr: true,
-		},
-		{
-			description: "error no tag opts",
-			shouldErr:   true,
-		},
-	}
+	tag, err := c.GenerateFullyQualifiedImageName(".", "img:tag")
+	testutil.CheckErrorAndDeepEqual(t, false, err, "img:tag", tag)
 
-	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			c := &ChecksumTagger{}
-			tag, err := c.GenerateFullyQualifiedImageName(".", test.opts)
-			testutil.CheckErrorAndDeepEqual(t, test.shouldErr, err, test.expected, tag)
-		})
-	}
+	tag, err = c.GenerateFullyQualifiedImageName(".", "img")
+	testutil.CheckErrorAndDeepEqual(t, false, err, "img:latest", tag)
+
+	tag, err = c.GenerateFullyQualifiedImageName(".", "registry.example.com:8080/img:tag")
+	testutil.CheckErrorAndDeepEqual(t, false, err, "registry.example.com:8080/img:tag", tag)
+
+	tag, err = c.GenerateFullyQualifiedImageName(".", "registry.example.com:8080/img")
+	testutil.CheckErrorAndDeepEqual(t, false, err, "registry.example.com:8080/img:latest", tag)
+
+	tag, err = c.GenerateFullyQualifiedImageName(".", "registry.example.com/img")
+	testutil.CheckErrorAndDeepEqual(t, false, err, "registry.example.com/img:latest", tag)
+
+	tag, err = c.GenerateFullyQualifiedImageName(".", "registry.example.com:8080:garbage")
+	testutil.CheckErrorAndDeepEqual(t, true, err, "", tag)
 }

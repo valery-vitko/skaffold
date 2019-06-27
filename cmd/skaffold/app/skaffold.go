@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,12 +17,12 @@ limitations under the License.
 package app
 
 import (
-	"os"
+	"io"
 
 	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/cmd"
 )
 
-func Run() error {
-	c := cmd.NewSkaffoldCommand(os.Stdout, os.Stderr)
+func Run(out, stderr io.Writer) error {
+	c := cmd.NewSkaffoldCommand(out, stderr)
 	return c.Execute()
 }

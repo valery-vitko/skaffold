@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,26 +21,10 @@ import (
 	"io"
 
 	"github.com/pkg/errors"
-	"github.com/spf13/cobra"
-
-	"gopkg.in/yaml.v2"
+	yaml "gopkg.in/yaml.v2"
 )
 
-func NewCmdList(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all values set in the global skaffold config",
-		Args:  cobra.ExactArgs(0),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runList(out)
-		},
-	}
-	AddConfigFlags(cmd)
-	AddListFlags(cmd)
-	return cmd
-}
-
-func runList(out io.Writer) error {
+func List(out io.Writer) error {
 	var configYaml []byte
 	if showAll {
 		cfg, err := readConfig()
@@ -67,7 +51,9 @@ func runList(out io.Writer) error {
 			return errors.Wrap(err, "marshaling config")
 		}
 	}
-	out.Write([]byte(fmt.Sprintf("skaffold config: %s\n", configFile)))
+
+	fmt.Fprintf(out, "skaffold config: %s\n", configFile)
 	out.Write(configYaml)
+
 	return nil
 }

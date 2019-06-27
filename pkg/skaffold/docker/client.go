@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,14 +25,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/version"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
 	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/version"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/tlsconfig"
@@ -40,33 +40,31 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-type APIClient interface {
-	client.CommonAPIClient
-}
-
 var (
 	dockerAPIClientOnce sync.Once
-	dockerAPIClient     APIClient
+	dockerAPIClient     LocalDaemon
 	dockerAPIClientErr  error
 )
 
 // NewAPIClient guesses the docker client to use based on current kubernetes context.
-func NewAPIClient() (APIClient, error) {
+func NewAPIClient(forceRemove bool, insecureRegistries map[string]bool) (LocalDaemon, error) {
 	dockerAPIClientOnce.Do(func() {
-		kubeContext, err := kubectx.CurrentContext()
+		kubeConfig, err := kubectx.CurrentConfig()
 		if err != nil {
 			dockerAPIClientErr = errors.Wrap(err, "getting current cluster context")
 			return
 		}
 
-		dockerAPIClient, dockerAPIClientErr = newAPIClient(kubeContext)
+		env, apiClient, err := newAPIClient(kubeConfig.CurrentContext)
+		dockerAPIClient = NewLocalDaemon(apiClient, env, forceRemove, insecureRegistries)
+		dockerAPIClientErr = err
 	})
 
 	return dockerAPIClient, dockerAPIClientErr
 }
 
 // newAPIClient guesses the docker client to use based on current kubernetes context.
-func newAPIClient(kubeContext string) (APIClient, error) {
+func newAPIClient(kubeContext string) ([]string, client.CommonAPIClient, error) {
 	if kubeContext == constants.DefaultMinikubeContext {
 		return newMinikubeAPIClient()
 	}
@@ -76,19 +74,19 @@ func newAPIClient(kubeContext string) (APIClient, error) {
 // newEnvAPIClient returns a docker client based on the environment variables set.
 // It will "negotiate" the highest possible API version supported by both the client
 // and the server if there is a mismatch.
-func newEnvAPIClient() (APIClient, error) {
+func newEnvAPIClient() ([]string, client.CommonAPIClient, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithHTTPHeaders(getUserAgentHeader()))
 	if err != nil {
-		return nil, fmt.Errorf("error getting docker client: %s", err)
+		return nil, nil, fmt.Errorf("error getting docker client: %s", err)
 	}
 	cli.NegotiateAPIVersion(context.Background())
 
-	return cli, nil
+	return nil, cli, nil
 }
 
 // newMinikubeAPIClient returns a docker client using the environment variables
 // provided by minikube.
-func newMinikubeAPIClient() (APIClient, error) {
+func newMinikubeAPIClient() ([]string, client.CommonAPIClient, error) {
 	env, err := getMinikubeDockerEnv()
 	if err != nil {
 		logrus.Warnf("Could not get minikube docker env, falling back to local docker daemon: %s", err)
@@ -105,7 +103,7 @@ func newMinikubeAPIClient() (APIClient, error) {
 		}
 		tlsc, err := tlsconfig.Client(options)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		httpclient = &http.Client{
@@ -125,11 +123,20 @@ func newMinikubeAPIClient() (APIClient, error) {
 		version = api.DefaultVersion
 	}
 
-	return client.NewClientWithOpts(
+	api, err := client.NewClientWithOpts(
 		client.WithHost(host),
 		client.WithVersion(version),
 		client.WithHTTPClient(httpclient),
 		client.WithHTTPHeaders(getUserAgentHeader()))
+
+	// Keep the minikube environment variables
+	var environment []string
+	for k, v := range env {
+		environment = append(environment, fmt.Sprintf("%s=%s", k, v))
+	}
+	sort.Strings(environment)
+
+	return environment, api, err
 }
 
 func getUserAgentHeader() map[string]string {
@@ -173,6 +180,7 @@ func getMinikubeDockerEnv() (map[string]string, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "getting minikube filename")
 	}
+
 	cmd := exec.Command(miniKubeFilename, "docker-env", "--shell", "none")
 	out, err := util.RunCmdOut(cmd)
 	if err != nil {

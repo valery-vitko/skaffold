@@ -1,7 +1,7 @@
 // +build !windows
 
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -62,23 +62,18 @@ func TestGetCommand(t *testing.T) {
 			},
 		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			tmpDir, cleanup := testutil.NewTempDir(t)
-			defer cleanup()
-
-			for _, file := range test.filesInWorkspace {
-				tmpDir.Write(file, "")
-			}
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpDir := t.NewTempDir().
+				Touch(test.filesInWorkspace...)
 
 			definition := &CommandWrapper{Executable: test.defaultExecutable, Wrapper: test.wrapperExecutable}
 			cmd := definition.CreateCommand(context.TODO(), tmpDir.Root(), test.args)
 
 			expectedCmd := test.expectedCmd(tmpDir.Root())
-			testutil.CheckDeepEqual(t, expectedCmd.Path, cmd.Path)
-			testutil.CheckDeepEqual(t, expectedCmd.Args, cmd.Args)
-			testutil.CheckDeepEqual(t, expectedCmd.Dir, cmd.Dir)
+			t.CheckDeepEqual(expectedCmd.Path, cmd.Path)
+			t.CheckDeepEqual(expectedCmd.Args, cmd.Args)
+			t.CheckDeepEqual(expectedCmd.Dir, cmd.Dir)
 		})
 	}
 }

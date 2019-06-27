@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -73,14 +73,14 @@ func TestParseReference(t *testing.T) {
 			expectedFullyQualified: false,
 		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
+		testutil.Run(t, test.description, func(t *testutil.T) {
 			parsed, err := ParseReference(test.image)
 
-			testutil.CheckErrorAndDeepEqual(t, false, err, test.expectedName, parsed.BaseName)
-			testutil.CheckDeepEqual(t, test.expectedTag, parsed.Tag)
-			testutil.CheckDeepEqual(t, test.expectedFullyQualified, parsed.FullyQualified)
+			t.CheckNoError(err)
+			t.CheckDeepEqual(test.expectedName, parsed.BaseName)
+			t.CheckDeepEqual(test.expectedTag, parsed.Tag)
+			t.CheckDeepEqual(test.expectedFullyQualified, parsed.FullyQualified)
 		})
 	}
 }

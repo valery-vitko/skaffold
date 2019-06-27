@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,30 +23,30 @@ import (
 
 const maxLength = 255
 
-const gcr = "gcr.io"
-const escapeChars = "[/._:@]"
-const prefixRegexStr = "gcr.io/[a-zA-Z]+/"
-
-var escapeRegex = regexp.MustCompile(escapeChars)
-var prefixRegex = regexp.MustCompile(prefixRegexStr)
+var (
+	escapeRegex = regexp.MustCompile(`[/._:@]`)
+	prefixRegex = regexp.MustCompile(`(.*\.)?gcr.io/[a-zA-Z0-9-_]+/?`)
+)
 
 func SubstituteDefaultRepoIntoImage(defaultRepo string, originalImage string) string {
 	if defaultRepo == "" {
 		return originalImage
 	}
-	if strings.HasPrefix(defaultRepo, gcr) {
-		originalPrefix := prefixRegex.FindString(originalImage)
-		defaultRepoPrefix := prefixRegex.FindString(defaultRepo)
 
+	originalPrefix := prefixRegex.FindString(originalImage)
+	defaultRepoPrefix := prefixRegex.FindString(defaultRepo)
+	if originalPrefix != "" && defaultRepoPrefix != "" {
+		// prefixes match
 		if originalPrefix == defaultRepoPrefix {
-			// prefixes match
 			return defaultRepo + "/" + originalImage[len(originalPrefix):]
-		} else if strings.HasPrefix(originalImage, defaultRepo) {
+		}
+		if strings.HasPrefix(originalImage, defaultRepo) {
 			return originalImage
 		}
 		// prefixes don't match, concatenate and truncate
 		return truncate(defaultRepo + "/" + originalImage)
 	}
+
 	return truncate(defaultRepo + "/" + escapeRegex.ReplaceAllString(originalImage, "_"))
 }
 

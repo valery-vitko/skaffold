@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
@@ -28,8 +29,40 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	tags = iota
+	commitSha
+	abbrevCommitSha
+	treeSha
+	abbrevTreeSha
+)
+
 // GitCommit tags an image by the git commit it was built at.
-type GitCommit struct{}
+type GitCommit struct {
+	variant int
+}
+
+// NewGitCommit creates a new git commit tagger. It fails if the tagger variant is invalid.
+func NewGitCommit(taggerVariant string) (*GitCommit, error) {
+	var variant int
+	switch strings.ToLower(taggerVariant) {
+	case "", "tags":
+		// default to "tags" when unset
+		variant = tags
+	case "commitsha":
+		variant = commitSha
+	case "abbrevcommitsha":
+		variant = abbrevCommitSha
+	case "treesha":
+		variant = treeSha
+	case "abbrevtreesha":
+		variant = abbrevTreeSha
+	default:
+		return nil, fmt.Errorf("%s is not a valid git tagger variant", taggerVariant)
+	}
+
+	return &GitCommit{variant: variant}, nil
+}
 
 // Labels are labels specific to the git tagger.
 func (c *GitCommit) Labels() map[string]string {
@@ -39,10 +72,11 @@ func (c *GitCommit) Labels() map[string]string {
 }
 
 // GenerateFullyQualifiedImageName tags an image with the supplied image name and the git commit.
-func (c *GitCommit) GenerateFullyQualifiedImageName(workingDir string, opts *Options) (string, error) {
-	hash, err := runGit(workingDir, "rev-parse", "--short", "HEAD")
+func (c *GitCommit) GenerateFullyQualifiedImageName(workingDir string, imageName string) (string, error) {
+	ref, err := c.makeGitTag(workingDir)
 	if err != nil {
-		return fallbackOnDigest(opts, err), nil
+		logrus.Warnln("Unable to find git commit:", err)
+		return fmt.Sprintf("%s:dirty", imageName), nil
 	}
 
 	changes, err := runGit(workingDir, "status", ".", "--porcelain")
@@ -51,13 +85,58 @@ func (c *GitCommit) GenerateFullyQualifiedImageName(workingDir string, opts *Opt
 	}
 
 	if len(changes) > 0 {
-		return dirtyTag(hash, opts), nil
+		return fmt.Sprintf("%s:%s-dirty", imageName, ref), nil
 	}
 
-	// Ignore error. It means there's no tag.
-	tag, _ := runGit(workingDir, "describe", "--tags", "--exact-match")
+	return fmt.Sprintf("%s:%s", imageName, ref), nil
+}
 
-	return commitOrTag(hash, tag, opts), nil
+func (c *GitCommit) makeGitTag(workingDir string) (string, error) {
+	args := make([]string, 0, 4)
+	switch c.variant {
+	case tags:
+		args = append(args, "describe", "--tags", "--always")
+	case commitSha, abbrevCommitSha:
+		args = append(args, "rev-list", "-1", "HEAD")
+		if c.variant == abbrevCommitSha {
+			args = append(args, "--abbrev-commit")
+		}
+	case treeSha, abbrevTreeSha:
+		gitPath, err := getGitPathToWorkdir(workingDir)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "rev-parse")
+		if c.variant == abbrevTreeSha {
+			args = append(args, "--short")
+		}
+		// revision must come after the --short flag
+		args = append(args, "HEAD:"+gitPath+"/")
+	default:
+		return "", errors.New("invalid git tag variant: defaulting to 'dirty'")
+	}
+
+	return runGit(workingDir, args...)
+}
+
+func getGitPathToWorkdir(workingDir string) (string, error) {
+	absWorkingDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", err
+	}
+
+	// git reports the gitdir with resolved symlinks, so we need to do this too in order for filepath.Rel to work
+	absWorkingDir, err = filepath.EvalSymlinks(absWorkingDir)
+	if err != nil {
+		return "", err
+	}
+
+	gitRoot, err := runGit(workingDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Rel(gitRoot, absWorkingDir)
 }
 
 func runGit(workingDir string, arg ...string) (string, error) {
@@ -70,26 +149,4 @@ func runGit(workingDir string, arg ...string) (string, error) {
 	}
 
 	return string(bytes.TrimSpace(out)), nil
-}
-
-func commitOrTag(currentTag string, tag string, opts *Options) string {
-	if len(tag) > 0 {
-		currentTag = tag
-	}
-
-	return fmt.Sprintf("%s:%s", opts.ImageName, currentTag)
-}
-
-func shortDigest(opts *Options) string {
-	return strings.TrimPrefix(opts.Digest, "sha256:")[0:7]
-}
-
-func dirtyTag(currentTag string, opts *Options) string {
-	return fmt.Sprintf("%s:%s-dirty-%s", opts.ImageName, currentTag, shortDigest(opts))
-}
-
-func fallbackOnDigest(opts *Options, err error) string {
-	logrus.Warnln("Using digest instead of git commit:", err)
-
-	return fmt.Sprintf("%s:dirty-%s", opts.ImageName, shortDigest(opts))
 }

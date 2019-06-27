@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,34 +19,23 @@ package config
 import (
 	"fmt"
 	"io"
-
-	"github.com/spf13/cobra"
 )
 
-func NewCmdUnset(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "unset",
-		Short: "Unset a value in the global skaffold config",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			resolveKubectlContext()
-			if err := unsetConfigValue(args[0]); err != nil {
-				return err
-			}
-			logUnsetConfigForUser(out, args[0])
-			return nil
-		},
+func Unset(out io.Writer, args []string) error {
+	resolveKubectlContext()
+	if err := unsetConfigValue(args[0]); err != nil {
+		return err
 	}
-	AddConfigFlags(cmd)
-	AddSetFlags(cmd)
-	return cmd
+
+	logUnsetConfigForUser(out, args[0])
+	return nil
 }
 
 func logUnsetConfigForUser(out io.Writer, key string) {
 	if global {
-		out.Write([]byte(fmt.Sprintf("unset global value %s", key)))
+		fmt.Fprintf(out, "unset global value %s\n", key)
 	} else {
-		out.Write([]byte(fmt.Sprintf("unset value %s for context %s\n", key, kubecontext)))
+		fmt.Fprintf(out, "unset value %s for context %s\n", key, kubecontext)
 	}
 }
 

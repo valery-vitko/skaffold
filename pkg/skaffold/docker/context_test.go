@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,62 +27,50 @@ import (
 )
 
 func TestDockerContext(t *testing.T) {
-	tmpDir, cleanup := testutil.NewTempDir(t)
-	defer cleanup()
+	for _, dir := range []string{".", "sub"} {
+		testutil.Run(t, dir, func(t *testutil.T) {
+			imageFetcher := fakeImageFetcher{}
+			t.Override(&RetrieveImage, imageFetcher.fetch)
+			t.NewTempDir().
+				Write(dir+"/.dockerignore", "**/ignored.txt\nalsoignored.txt").
+				Write(dir+"/Dockerfile", "FROM busybox\nCOPY ./files /files").
+				Touch(dir + "/files/ignored.txt").
+				Touch(dir + "/files/included.txt").
+				Touch(dir + "/ignored.txt").
+				Touch(dir + "/alsoignored.txt").
+				Chdir()
 
-	imageFetcher := fakeImageFetcher{}
-	RetrieveImage = imageFetcher.fetch
-	defer func() { RetrieveImage = retrieveImage }()
+			artifact := &latest.DockerArtifact{
+				DockerfilePath: "Dockerfile",
+			}
 
-	artifact := &latest.DockerArtifact{
-		DockerfilePath: "Dockerfile",
-		BuildArgs:      map[string]*string{},
-	}
+			reader, writer := io.Pipe()
+			go func() {
+				err := CreateDockerTarContext(context.Background(), writer, dir, artifact, map[string]bool{})
+				if err != nil {
+					writer.CloseWithError(err)
+				} else {
+					writer.Close()
+				}
+			}()
 
-	tmpDir.Write("files/ignored.txt", "")
-	tmpDir.Write("files/included.txt", "")
-	tmpDir.Write(".dockerignore", "**/ignored.txt\nalsoignored.txt")
-	tmpDir.Write("Dockerfile", "FROM alpine\nCOPY ./files /files")
-	tmpDir.Write("ignored.txt", "")
-	tmpDir.Write("alsoignored.txt", "")
+			files := make(map[string]bool)
+			tr := tar.NewReader(reader)
+			for {
+				header, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				t.CheckNoError(err)
 
-	reader, writer := io.Pipe()
-	go func() {
-		err := CreateDockerTarContext(context.Background(), writer, tmpDir.Root(), artifact)
-		if err != nil {
-			writer.CloseWithError(err)
-		} else {
-			writer.Close()
-		}
-	}()
+				files[header.Name] = true
+			}
 
-	files := make(map[string]bool)
-	tr := tar.NewReader(reader)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		files[header.Name] = true
-	}
-
-	if files["ignored.txt"] {
-		t.Error("File ignored.txt should have been excluded, but was not")
-	}
-	if files["alsoignored.txt"] {
-		t.Error("File alsoignored.txt should have been excluded, but was not")
-	}
-	if files["files/ignored.txt"] {
-		t.Error("File files/ignored.txt should have been excluded, but was not")
-	}
-	if !files["files/included.txt"] {
-		t.Error("File files/included.txt should have been included, but was not")
-	}
-	if !files["Dockerfile"] {
-		t.Error("File Dockerfile should have been included, but was not")
+			t.CheckDeepEqual(false, files["ignored.txt"])
+			t.CheckDeepEqual(false, files["alsoignored.txt"])
+			t.CheckDeepEqual(false, files["files/ignored.txt"])
+			t.CheckDeepEqual(true, files["files/included.txt"])
+			t.CheckDeepEqual(true, files["Dockerfile"])
+		})
 	}
 }

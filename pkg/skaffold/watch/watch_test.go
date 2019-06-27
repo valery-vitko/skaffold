@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package watch
 
 import (
 	"context"
+	"io/ioutil"
 	"sync"
 	"testing"
 	"time"
@@ -25,70 +26,67 @@ import (
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
-func TestWatch(t *testing.T) {
+func TestWatchWithPollTrigger(t *testing.T) {
+	testWatch(t, &pollTrigger{
+		Interval: 10 * time.Millisecond,
+	})
+}
+
+func TestWatchWithNotifyTrigger(t *testing.T) {
+	t.Skip("Skip flaky test")
+	testWatch(t, &fsNotifyTrigger{
+		Interval: 10 * time.Millisecond,
+	})
+}
+
+func testWatch(t *testing.T, trigger Trigger) {
 	var tests = []struct {
 		description string
-		setup       func(folder *testutil.TempDir)
 		update      func(folder *testutil.TempDir)
 	}{
 		{
 			description: "file change",
-			setup: func(folder *testutil.TempDir) {
-				folder.Write("file", "content")
-			},
 			update: func(folder *testutil.TempDir) {
 				folder.Chtimes("file", time.Now().Add(2*time.Second))
 			},
 		},
 		{
 			description: "file delete",
-			setup: func(folder *testutil.TempDir) {
-				folder.Write("file", "content")
-			},
 			update: func(folder *testutil.TempDir) {
 				folder.Remove("file")
 			},
 		},
 		{
 			description: "file create",
-			setup: func(folder *testutil.TempDir) {
-				folder.Write("file", "content")
-			},
 			update: func(folder *testutil.TempDir) {
 				folder.Write("new", "content")
 			},
 		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			folder, cleanup := testutil.NewTempDir(t)
-			defer cleanup()
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpDir := t.NewTempDir().
+				Write("file", "content")
 
-			test.setup(folder)
 			folderChanged := newCallback()
 			somethingChanged := newCallback()
 
 			// Watch folder
-			watcher := NewWatcher()
-			err := watcher.Register(folder.List, folderChanged.call)
-			testutil.CheckError(t, false, err)
+			watcher := NewWatcher(trigger)
+			err := watcher.Register(tmpDir.List, folderChanged.call)
+			t.CheckNoError(err)
 
 			// Run the watcher
 			ctx, cancel := context.WithCancel(context.Background())
 			var stopped sync.WaitGroup
 			stopped.Add(1)
 			go func() {
-				trigger := &pollTrigger{
-					Interval: 10 * time.Millisecond,
-				}
-
-				err = watcher.Run(ctx, trigger, somethingChanged.callNoErr)
+				err = watcher.Run(ctx, ioutil.Discard, somethingChanged.callNoErr)
 				stopped.Done()
-				testutil.CheckError(t, false, err)
+				t.CheckNoError(err)
 			}()
 
-			test.update(folder)
+			test.update(tmpDir)
 
 			// Wait for the callbacks
 			folderChanged.wait()

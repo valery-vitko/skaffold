@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -87,91 +87,56 @@ func TestEvents(t *testing.T) {
 			expected: Events{Deleted: []string{"a", "b", "c"}},
 		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			testutil.CheckDeepEqual(t, test.expected, events(test.prev, test.current))
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.CheckDeepEqual(test.expected, events(test.prev, test.current))
 		})
 	}
 }
 
 func TestStat(t *testing.T) {
-	var tests = []struct {
-		description string
-		setup       func(folder *testutil.TempDir)
-		expected    FileMap
-		shouldErr   bool
-	}{
-		{
-			description: "stat files",
-			setup: func(folder *testutil.TempDir) {
-				folder.Write("file", "content")
-			},
-		},
-	}
+	testutil.Run(t, "", func(t *testutil.T) {
+		tmpDir := t.NewTempDir().
+			Write("file", "content")
 
-	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			folder, cleanup := testutil.NewTempDir(t)
-			defer cleanup()
+		list, _ := tmpDir.List()
+		actual, err := Stat(tmpDir.List)
 
-			test.setup(folder)
-			list, _ := folder.List()
-
-			actual, err := Stat(folder.List)
-			testutil.CheckError(t, test.shouldErr, err)
-			checkListInMap(t, list, actual)
-		})
-	}
+		t.CheckNoError(err)
+		t.CheckDeepEqual(len(list), len(actual))
+		for _, f := range list {
+			_, present := actual[f]
+			t.CheckDeepEqual(true, present)
+		}
+	})
 }
 
 func TestStatNotExist(t *testing.T) {
 	var tests = []struct {
 		description string
-		setup       func(folder *testutil.TempDir)
 		deps        []string
 		depsErr     error
-		expected    FileMap
 		shouldErr   bool
 	}{
 		{
 			description: "no error when deps returns nonexisting file",
-			setup: func(folder *testutil.TempDir) {
-				folder.Write("file", "content")
-			},
-			deps: []string{"file/that/doesnt/exist/anymore"},
+			deps:        []string{"file/that/doesnt/exist/anymore"},
 		},
 		{
 			description: "deps function error",
-			setup: func(folder *testutil.TempDir) {
-				folder.Write("file", "content")
-			},
-			deps:      []string{"file/that/doesnt/exist/anymore"},
-			depsErr:   fmt.Errorf(""),
-			shouldErr: true,
+			deps:        []string{"file/that/doesnt/exist/anymore"},
+			depsErr:     fmt.Errorf(""),
+			shouldErr:   true,
 		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			folder, cleanup := testutil.NewTempDir(t)
-			defer cleanup()
-
-			test.setup(folder)
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.NewTempDir().
+				Write("file", "content")
 
 			_, err := Stat(func() ([]string, error) { return test.deps, test.depsErr })
-			testutil.CheckError(t, test.shouldErr, err)
-		})
-	}
-}
 
-func checkListInMap(t *testing.T, list []string, m FileMap) {
-	for _, f := range list {
-		if _, ok := m[f]; !ok {
-			t.Errorf("File %s not in map", f)
-		}
-	}
-	if len(list) != len(m) {
-		t.Errorf("List and map length differ %s, %s", list, m)
+			t.CheckError(test.shouldErr, err)
+		})
 	}
 }

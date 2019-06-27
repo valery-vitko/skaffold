@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,27 +20,21 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/registry"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/pkg/errors"
 )
 
 // ExtractProjectID extracts the GCP projectID from a docker image name
 // This only works if the imageName is pushed to gcr.io.
 func ExtractProjectID(imageName string) (string, error) {
-	ref, err := reference.ParseNormalizedNamed(imageName)
+	ref, err := name.ParseReference(imageName, name.WeakValidation)
 	if err != nil {
-		return "", errors.Wrap(err, "parsing image name for registry")
+		return "", errors.Wrap(err, "parsing image name")
 	}
 
-	repoInfo, err := registry.ParseRepositoryInfo(ref)
-	if err != nil {
-		return "", err
-	}
-
-	index := repoInfo.Index
-	if index.Name == "gcr.io" || strings.HasSuffix(index.Name, ".gcr.io") {
-		parts := strings.Split(repoInfo.Name.String(), "/")
+	registry := ref.Context().Registry.Name()
+	if registry == "gcr.io" || strings.HasSuffix(registry, ".gcr.io") {
+		parts := strings.Split(imageName, "/")
 		if len(parts) >= 2 {
 			return parts[1], nil
 		}

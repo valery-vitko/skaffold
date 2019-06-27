@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,33 +20,21 @@ import (
 	"context"
 	"io"
 
-	"github.com/pkg/errors"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/spf13/cobra"
 )
 
 // NewCmdDelete describes the CLI command to delete deployed resources.
 func NewCmdDelete(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "delete",
-		Short: "Delete the deployed resources",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return delete(out)
-		},
-	}
-	AddRunDevFlags(cmd)
-	return cmd
+	return NewCmd(out, "delete").
+		WithDescription("Delete the deployed resources").
+		WithCommonFlags().
+		NoArgs(cancelWithCtrlC(context.Background(), doDelete))
 }
 
-func delete(out io.Writer) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	catchCtrlC(cancel)
-
-	runner, _, err := newRunner(opts)
-	if err != nil {
-		return errors.Wrap(err, "creating runner")
-	}
-
-	return runner.Cleanup(ctx, out)
+func doDelete(ctx context.Context, out io.Writer) error {
+	return withRunner(ctx, func(r runner.Runner, _ *latest.SkaffoldConfig) error {
+		return r.Cleanup(ctx, out)
+	})
 }

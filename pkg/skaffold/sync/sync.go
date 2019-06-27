@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,44 +20,62 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/bmatcuk/doublestar"
-	"github.com/sirupsen/logrus"
-
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/watch"
+	"github.com/bmatcuk/doublestar"
 	"github.com/pkg/errors"
-	"k8s.io/api/core/v1"
+	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+var (
+	// WorkingDir is here for testing
+	WorkingDir = docker.RetrieveWorkingDir
 )
 
 type Syncer interface {
 	Sync(context.Context, *Item) error
 }
 
+type syncMap map[string][]string
+
 type Item struct {
 	Image  string
-	Copy   map[string]string
-	Delete map[string]string
+	Copy   map[string][]string
+	Delete map[string][]string
 }
 
-func NewItem(a *latest.Artifact, e watch.Events, builds []build.Artifact) (*Item, error) {
+func NewItem(a *latest.Artifact, e watch.Events, builds []build.Artifact, insecureRegistries map[string]bool) (*Item, error) {
 	// If there are no changes, short circuit and don't sync anything
-	if !e.HasChanged() || len(a.Sync) == 0 {
+	if !e.HasChanged() || a.Sync == nil || len(a.Sync.Manual) == 0 {
 		return nil, nil
 	}
 
-	toCopy, err := intersect(a.Workspace, a.Sync, append(e.Added, e.Modified...))
+	tag := latestTag(a.ImageName, builds)
+	if tag == "" {
+		return nil, fmt.Errorf("could not find latest tag for image %s in builds: %v", a.ImageName, builds)
+	}
+
+	containerWd, err := WorkingDir(tag, insecureRegistries)
+	if err != nil {
+		return nil, errors.Wrapf(err, "retrieving working dir for %s", tag)
+	}
+
+	toCopy, err := intersect(a.Workspace, containerWd, a.Sync.Manual, append(e.Added, e.Modified...))
 	if err != nil {
 		return nil, errors.Wrap(err, "intersecting sync map and added, modified files")
 	}
 
-	toDelete, err := intersect(a.Workspace, a.Sync, e.Deleted)
+	toDelete, err := intersect(a.Workspace, containerWd, a.Sync.Manual, e.Deleted)
 	if err != nil {
 		return nil, errors.Wrap(err, "intersecting sync map and deleted files")
 	}
@@ -65,11 +83,6 @@ func NewItem(a *latest.Artifact, e watch.Events, builds []build.Artifact) (*Item
 	// Something went wrong, don't sync, rebuild.
 	if toCopy == nil || toDelete == nil {
 		return nil, nil
-	}
-
-	tag := latestTag(a.ImageName, builds)
-	if tag == "" {
-		return nil, fmt.Errorf("could not find latest tag for image %s in builds: %v", a.ImageName, builds)
 	}
 
 	return &Item{
@@ -88,49 +101,55 @@ func latestTag(image string, builds []build.Artifact) string {
 	return ""
 }
 
-func intersect(context string, syncMap map[string]string, files []string) (map[string]string, error) {
-	ret := map[string]string{}
-
+func intersect(contextWd, containerWd string, syncRules []*latest.SyncRule, files []string) (syncMap, error) {
+	ret := make(syncMap)
 	for _, f := range files {
-		relPath, err := filepath.Rel(context, f)
-
+		relPath, err := filepath.Rel(contextWd, f)
 		if err != nil {
-			return nil, errors.Wrapf(err, "changed file %s can't be found relative to context %s", f, context)
+			return nil, errors.Wrapf(err, "changed file %s can't be found relative to context %s", f, contextWd)
 		}
-		var matches bool
-		for p, dst := range syncMap {
-			match, err := doublestar.PathMatch(filepath.FromSlash(p), relPath)
-			if err != nil {
-				return nil, errors.Wrapf(err, "pattern error for %s", relPath)
-			}
 
-			if match {
-				staticPath := strings.Split(filepath.FromSlash(p), "*")[0]
-
-				// Every file must match at least one sync pattern, if not we'll have to
-				// skip the entire sync
-				matches = true
-				// If the source has special match characters,
-				// the destination must be a directory
-				// The path package must be used here to enforce slashes,
-				// since the destination is always a linux filesystem.
-				if util.HasMeta(p) {
-					relPathDynamic := strings.TrimPrefix(relPath, staticPath)
-					dst = filepath.ToSlash(filepath.Join(dst, relPathDynamic))
-				}
-				ret[f] = dst
-			}
+		dsts, err := matchSyncRules(syncRules, relPath, containerWd)
+		if err != nil {
+			return nil, err
 		}
-		if !matches {
+
+		if len(dsts) == 0 {
 			logrus.Infof("Changed file %s does not match any sync pattern. Skipping sync", relPath)
 			return nil, nil
 		}
 
+		ret[f] = dsts
 	}
 	return ret, nil
 }
 
-func Perform(ctx context.Context, image string, files map[string]string, cmdFn func(context.Context, v1.Pod, v1.Container, string, string) *exec.Cmd) error {
+func matchSyncRules(syncRules []*latest.SyncRule, relPath, containerWd string) ([]string, error) {
+	dsts := make([]string, 0, 1)
+	for _, r := range syncRules {
+		matches, err := doublestar.PathMatch(filepath.FromSlash(r.Src), relPath)
+		if err != nil {
+			return nil, errors.Wrapf(err, "pattern error for %s", relPath)
+		}
+
+		if !matches {
+			continue
+		}
+
+		wd := ""
+		if !path.IsAbs(r.Dest) {
+			// Convert relative destinations to absolute via the working dir in the container.
+			wd = containerWd
+		}
+
+		// Map the paths as a tree from the prefix.
+		subPath := strings.TrimPrefix(filepath.ToSlash(relPath), r.Strip)
+		dsts = append(dsts, path.Join(wd, r.Dest, subPath))
+	}
+	return dsts, nil
+}
+
+func Perform(ctx context.Context, image string, files syncMap, cmdFn func(context.Context, v1.Pod, v1.Container, map[string][]string) []*exec.Cmd, namespaces []string) error {
 	if len(files) == 0 {
 		return nil
 	}
@@ -140,32 +159,32 @@ func Perform(ctx context.Context, image string, files map[string]string, cmdFn f
 		return errors.Wrap(err, "getting k8s client")
 	}
 
-	pods, err := client.CoreV1().Pods("").List(meta_v1.ListOptions{})
-	if err != nil {
-		return errors.Wrap(err, "getting pods")
-	}
+	numSynced := 0
+	for _, ns := range namespaces {
+		pods, err := client.CoreV1().Pods(ns).List(meta_v1.ListOptions{})
+		if err != nil {
+			return errors.Wrap(err, "getting pods for namespace "+ns)
+		}
 
-	synced := map[string]bool{}
-
-	for _, p := range pods.Items {
-		for _, c := range p.Spec.Containers {
-			if c.Image != image {
-				continue
-			}
-
-			for src, dst := range files {
-				cmd := cmdFn(ctx, p, c, src, dst)
-				if err := util.RunCmd(cmd); err != nil {
-					return err
+		for _, p := range pods.Items {
+			for _, c := range p.Spec.Containers {
+				if c.Image != image {
+					continue
 				}
 
-				synced[src] = true
+				cmds := cmdFn(ctx, p, c, files)
+				for _, cmd := range cmds {
+					if _, err := util.RunCmdOut(cmd); err != nil {
+						return err
+					}
+					numSynced++
+				}
 			}
 		}
 	}
 
-	if len(synced) != len(files) {
-		return errors.New("couldn't sync all the files")
+	if numSynced == 0 {
+		return errors.New("didn't sync any files")
 	}
 
 	return nil

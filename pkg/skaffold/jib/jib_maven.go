@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,12 +26,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// MavenCommand stores Maven executable and wrapper name
 var MavenCommand = util.CommandWrapper{Executable: "mvn", Wrapper: "mvnw"}
 
 // GetDependenciesMaven finds the source dependencies for the given jib-maven artifact.
 // All paths are absolute.
 func GetDependenciesMaven(ctx context.Context, workspace string, a *latest.JibMavenArtifact) ([]string, error) {
-	deps, err := getDependencies(getCommandMaven(ctx, workspace, a))
+	deps, err := getDependencies(workspace, getCommandMaven(ctx, workspace, a), a.Module)
 	if err != nil {
 		return nil, errors.Wrapf(err, "getting jibMaven dependencies")
 	}
@@ -39,8 +40,46 @@ func GetDependenciesMaven(ctx context.Context, workspace string, a *latest.JibMa
 	return deps, nil
 }
 
-func getCommandMaven(ctx context.Context, workspace string, a *latest.JibMavenArtifact) *exec.Cmd {
-	args := []string{"--quiet"}
+func getCommandMaven(ctx context.Context, workspace string, a *latest.JibMavenArtifact) exec.Cmd {
+	args := mavenArgs(a)
+	args = append(args, "jib:_skaffold-files-v2", "--quiet")
+
+	return MavenCommand.CreateCommand(ctx, workspace, args)
+}
+
+// GenerateMavenArgs generates the arguments to Maven for building the project as an image.
+func GenerateMavenArgs(goal string, imageName string, a *latest.JibMavenArtifact, skipTests bool) []string {
+	// disable jib's rich progress footer on builds; we could use --batch-mode
+	// but it also disables colour which can be helpful
+	args := []string{"-Djib.console=plain"}
+	args = append(args, mavenArgs(a)...)
+
+	if skipTests {
+		args = append(args, "-DskipTests=true")
+	}
+
+	if a.Module == "" {
+		// single-module project
+		args = append(args, "prepare-package", "jib:"+goal)
+	} else {
+		// multi-module project: we assume `package` is bound to `jib:<goal>`
+		args = append(args, "package")
+	}
+
+	args = append(args, "-Dimage="+imageName)
+
+	return args
+}
+
+func mavenArgs(a *latest.JibMavenArtifact) []string {
+	var args []string
+
+	args = append(args, a.Flags...)
+
+	if a.Profile != "" {
+		args = append(args, "--activate-profiles", a.Profile)
+	}
+
 	if a.Module == "" {
 		// single-module project
 		args = append(args, "--non-recursive")
@@ -48,10 +87,6 @@ func getCommandMaven(ctx context.Context, workspace string, a *latest.JibMavenAr
 		// multi-module project
 		args = append(args, "--projects", a.Module, "--also-make")
 	}
-	args = append(args, "jib:_skaffold-files")
-	if a.Profile != "" {
-		args = append(args, "--activate-profiles", a.Profile)
-	}
 
-	return MavenCommand.CreateCommand(ctx, workspace, args)
+	return args
 }

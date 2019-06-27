@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,59 +21,125 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/apimachinery/pkg/watch"
+	fake_testing "k8s.io/client-go/testing"
 )
 
-type BadReader struct{}
-
-func (BadReader) Read([]byte) (int, error) { return 0, errors.New("bad read") }
-
-type BadWriter struct{}
-
-func (BadWriter) Write([]byte) (int, error) { return 0, errors.New("bad write") }
-
-type FakeReaderCloser struct {
-	Err error
+type T struct {
+	*testing.T
+	teardownActions []func()
 }
 
-func (f FakeReaderCloser) Close() error             { return nil }
-func (f FakeReaderCloser) Read([]byte) (int, error) { return 0, f.Err }
+func (t *T) FakeRunOut(command string, output string) *FakeCmd {
+	return FakeRunOut(t.T, command, output)
+}
 
-func CheckDeepEqual(t *testing.T, expected, actual interface{}) {
+func (t *T) FakeRunOutErr(command string, output string, err error) *FakeCmd {
+	return FakeRunOutErr(t.T, command, output, err)
+}
+
+func (t *T) Override(dest, tmp interface{}) {
+	teardown, err := override(t.T, dest, tmp)
+	if err != nil {
+		t.Errorf("temporary override value is invalid: %v", err)
+		return
+	}
+	t.teardownActions = append(t.teardownActions, teardown)
+}
+
+func (t *T) CheckContains(expected, actual string) {
+	CheckContains(t.T, expected, actual)
+}
+
+func (t *T) CheckDeepEqual(expected, actual interface{}, opts ...cmp.Option) {
+	CheckDeepEqual(t.T, expected, actual, opts...)
+}
+
+func (t *T) CheckErrorAndDeepEqual(shouldErr bool, err error, expected, actual interface{}, opts ...cmp.Option) {
+	CheckErrorAndDeepEqual(t.T, shouldErr, err, expected, actual, opts...)
+}
+
+func (t *T) CheckError(shouldErr bool, err error) {
+	CheckError(t.T, shouldErr, err)
+}
+
+// CheckErrorContains checks that an error is not nil and contains
+// a given message.
+func (t *T) CheckErrorContains(message string, err error) {
 	t.Helper()
-	if diff := cmp.Diff(actual, expected); diff != "" {
+	if err == nil {
+		t.Error("expected error, but returned none")
+		return
+	}
+	if !strings.Contains(err.Error(), message) {
+		t.Errorf("expected message [%s] not found in error: %s", message, err.Error())
+		return
+	}
+}
+
+func (t *T) TempFile(prefix string, content []byte) string {
+	name, teardown := TempFile(t.T, prefix, content)
+	t.teardownActions = append(t.teardownActions, teardown)
+	return name
+}
+
+func (t *T) NewTempDir() *TempDir {
+	tmpDir, teardown := NewTempDir(t.T)
+	t.teardownActions = append(t.teardownActions, teardown)
+	return tmpDir
+}
+
+func Run(t *testing.T, name string, f func(t *T)) {
+	if name == "" {
+		name = t.Name()
+	}
+
+	t.Run(name, func(tt *testing.T) {
+		testWrapper := &T{
+			T: tt,
+		}
+
+		defer func() {
+			for _, teardownAction := range testWrapper.teardownActions {
+				teardownAction()
+			}
+		}()
+
+		f(testWrapper)
+	})
+}
+
+////
+
+func CheckContains(t *testing.T, expected, actual string) {
+	t.Helper()
+	if !strings.Contains(actual, expected) {
+		t.Errorf("expected output %s not found in output: %s", expected, actual)
+		return
+	}
+}
+
+func CheckDeepEqual(t *testing.T, expected, actual interface{}, opts ...cmp.Option) {
+	t.Helper()
+	if diff := cmp.Diff(actual, expected, opts...); diff != "" {
 		t.Errorf("%T differ (-got, +want): %s", expected, diff)
 		return
 	}
 }
 
-func CheckErrorAndDeepEqual(t *testing.T, shouldErr bool, err error, expected, actual interface{}) {
+func CheckErrorAndDeepEqual(t *testing.T, shouldErr bool, err error, expected, actual interface{}, opts ...cmp.Option) {
 	t.Helper()
 	if err := checkErr(shouldErr, err); err != nil {
 		t.Error(err)
 		return
 	}
-	if diff := cmp.Diff(actual, expected); diff != "" {
+	if diff := cmp.Diff(actual, expected, opts...); diff != "" {
 		t.Errorf("%T differ (-got, +want): %s", expected, diff)
-		return
-	}
-}
-
-func CheckErrorAndTypeEquality(t *testing.T, shouldErr bool, err error, expected, actual interface{}) {
-	t.Helper()
-	if err := checkErr(shouldErr, err); err != nil {
-		t.Error(err)
-		return
-	}
-	expectedType := reflect.TypeOf(expected)
-	actualType := reflect.TypeOf(actual)
-
-	if expectedType != actualType {
-		t.Errorf("Types do not match. Expected %s, Actual %s", expectedType, actualType)
 		return
 	}
 }
@@ -82,6 +148,12 @@ func CheckError(t *testing.T, shouldErr bool, err error) {
 	t.Helper()
 	if err := checkErr(shouldErr, err); err != nil {
 		t.Error(err)
+	}
+}
+
+func EnsureTestPanicked(t *testing.T) {
+	if recover() == nil {
+		t.Errorf("should have panicked")
 	}
 }
 
@@ -95,28 +167,6 @@ func checkErr(shouldErr bool, err error) error {
 	return nil
 }
 
-// SetEnvs takes a map of key values to set using os.Setenv and returns
-// a function that can be called to reset the envs to their previous values.
-func SetEnvs(t *testing.T, envs map[string]string) func(*testing.T) {
-	prevEnvs := map[string]string{}
-	for key, value := range envs {
-		prevEnv := os.Getenv(key)
-		prevEnvs[key] = prevEnv
-		err := os.Setenv(key, value)
-		if err != nil {
-			t.Error(err)
-		}
-	}
-	return func(t *testing.T) {
-		for key, value := range prevEnvs {
-			err := os.Setenv(key, value)
-			if err != nil {
-				t.Error(err)
-			}
-		}
-	}
-}
-
 // ServeFile serves a file with http. Returns the url to the file and a teardown
 // function that should be called to properly stop the server.
 func ServeFile(t *testing.T, content []byte) (url string, tearDown func()) {
@@ -125,4 +175,64 @@ func ServeFile(t *testing.T, content []byte) (url string, tearDown func()) {
 	}))
 
 	return ts.URL, ts.Close
+}
+
+// Override sets a dest variable to a given value.
+// Returns the function to call to restore the variable
+// to its original state.
+func Override(t *testing.T, dest, tmp interface{}) func() {
+	f, err := override(t, dest, tmp)
+	if err != nil {
+		t.Errorf("temporary value is invalid: %v", err)
+	}
+	return f
+}
+
+func override(t *testing.T, dest, tmp interface{}) (f func(), err error) {
+	t.Helper()
+
+	defer func() {
+		if r := recover(); r != nil {
+			f = nil
+			switch x := r.(type) {
+			case string:
+				err = errors.New(x)
+			case error:
+				err = x
+			default:
+				err = errors.New("unknown panic")
+			}
+		}
+	}()
+
+	dValue := reflect.ValueOf(dest).Elem()
+
+	// Save current value
+	curValue := reflect.New(dValue.Type()).Elem()
+	curValue.Set(dValue)
+
+	// Set to temporary value
+	var tmpV reflect.Value
+	if tmp == nil {
+		tmpV = reflect.Zero(dValue.Type())
+	} else {
+		tmpV = reflect.ValueOf(tmp)
+	}
+	dValue.Set(tmpV)
+
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Error("panic while restoring original value")
+			}
+		}()
+		dValue.Set(curValue)
+	}, nil
+}
+
+// SetupFakeWatcher helps set up a fake Kubernetes watcher
+func SetupFakeWatcher(w watch.Interface) func(a fake_testing.Action) (handled bool, ret watch.Interface, err error) {
+	return func(a fake_testing.Action) (handled bool, ret watch.Interface, err error) {
+		return true, w, nil
+	}
 }

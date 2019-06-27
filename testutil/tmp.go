@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,8 +47,9 @@ func TempFile(t *testing.T, prefix string, content []byte) (name string, tearDow
 
 // TempDir offers actions on a temp directory.
 type TempDir struct {
-	t    *testing.T
-	root string
+	t               *testing.T
+	root            string
+	resetCurrentDir func()
 }
 
 // NewTempDir creates a temporary directory and a teardown function
@@ -60,13 +61,17 @@ func NewTempDir(t *testing.T) (tmp *TempDir, tearDown func()) {
 	}
 
 	tmpDir := &TempDir{
-		t:    t,
-		root: root,
+		t:               t,
+		root:            root,
+		resetCurrentDir: func() {},
 	}
 
-	return tmpDir, func() {
-		os.RemoveAll(root)
-	}
+	return tmpDir, tmpDir.tearDown
+}
+
+func (h *TempDir) tearDown() {
+	h.resetCurrentDir()
+	os.RemoveAll(h.Root())
 }
 
 // Root returns the temp directory.
@@ -95,6 +100,33 @@ func (h *TempDir) Write(file, content string) *TempDir {
 	return h.failIfErr(ioutil.WriteFile(h.Path(file), []byte(content), os.ModePerm))
 }
 
+// WriteFiles write a list of files (path->content) in the temp directory.
+func (h *TempDir) WriteFiles(files map[string]string) *TempDir {
+	for path, content := range files {
+		h.Write(path, content)
+	}
+	return h
+}
+
+// Touch creates a list of empty files in the temp directory.
+func (h *TempDir) Touch(files ...string) *TempDir {
+	for _, file := range files {
+		h.Write(file, "")
+	}
+	return h
+}
+
+// Symlink creates a symlink.
+func (h *TempDir) Symlink(dst, src string) *TempDir {
+	h.failIfErr(os.MkdirAll(filepath.Dir(h.Path(src)), os.ModePerm))
+	return h.failIfErr(os.Symlink(h.Path(dst), h.Path(src)))
+}
+
+// Rename renames a file from oldname to newname
+func (h *TempDir) Rename(oldName, newName string) *TempDir {
+	return h.failIfErr(os.Rename(h.Path(oldName), h.Path(newName)))
+}
+
 // List lists all the files in the temp directory.
 func (h *TempDir) List() ([]string, error) {
 	var files []string
@@ -121,5 +153,35 @@ func (h *TempDir) failIfErr(err error) *TempDir {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	return h
+}
+
+// Paths returns the paths to a list of files in the temp directory.
+func (h *TempDir) Paths(files ...string) []string {
+	var paths []string
+	for _, file := range files {
+		paths = append(paths, h.Path(file))
+	}
+	return paths
+}
+
+// Chdir changes current directory to this temp directory.
+func (h *TempDir) Chdir() *TempDir {
+	pwd, err := os.Getwd()
+	if err != nil {
+		h.t.Fatal("unable to get current directory")
+	}
+
+	err = os.Chdir(h.Root())
+	if err != nil {
+		h.t.Fatal("unable to change current directory")
+	}
+
+	h.resetCurrentDir = func() {
+		if err := os.Chdir(pwd); err != nil {
+			h.t.Fatal("unable to reset current directory")
+		}
+	}
+
 	return h
 }

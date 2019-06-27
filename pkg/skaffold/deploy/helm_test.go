@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,14 +24,20 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
+	runcontext "github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/context"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	schemautil "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 	"github.com/GoogleContainerTools/skaffold/testutil"
+	homedir "github.com/mitchellh/go-homedir"
 	"github.com/sirupsen/logrus"
 )
 
@@ -57,9 +63,7 @@ var testDeployConfig = &latest.HelmDeploy{
 			Values: map[string]string{
 				"image": "skaffold-helm",
 			},
-			Overrides: map[string]interface{}{
-				"foo": "bar",
-			},
+			Overrides: schemautil.HelmOverrides{Values: map[string]interface{}{"foo": "bar"}},
 			SetValues: map[string]string{
 				"some.key": "somevalue",
 			},
@@ -75,13 +79,28 @@ var testDeployRecreatePodsConfig = &latest.HelmDeploy{
 			Values: map[string]string{
 				"image": "skaffold-helm",
 			},
-			Overrides: map[string]interface{}{
-				"foo": "bar",
-			},
+			Overrides: schemautil.HelmOverrides{Values: map[string]interface{}{"foo": "bar"}},
 			SetValues: map[string]string{
 				"some.key": "somevalue",
 			},
 			RecreatePods: true,
+		},
+	},
+}
+
+var testDeploySkipBuildDependenciesConfig = &latest.HelmDeploy{
+	Releases: []latest.HelmRelease{
+		{
+			Name:      "skaffold-helm",
+			ChartPath: "examples/test",
+			Values: map[string]string{
+				"image": "skaffold-helm",
+			},
+			Overrides: schemautil.HelmOverrides{Values: map[string]interface{}{"foo": "bar"}},
+			SetValues: map[string]string{
+				"some.key": "somevalue",
+			},
+			SkipBuildDependencies: true,
 		},
 	},
 }
@@ -94,9 +113,7 @@ var testDeployHelmStyleConfig = &latest.HelmDeploy{
 			Values: map[string]string{
 				"image": "skaffold-helm",
 			},
-			Overrides: map[string]interface{}{
-				"foo": "bar",
-			},
+			Overrides: schemautil.HelmOverrides{Values: map[string]interface{}{"foo": "bar"}},
 			SetValues: map[string]string{
 				"some.key": "somevalue",
 			},
@@ -145,9 +162,7 @@ var testDeployWithTemplatedName = &latest.HelmDeploy{
 			Values: map[string]string{
 				"image.tag": "skaffold-helm",
 			},
-			Overrides: map[string]interface{}{
-				"foo": "bar",
-			},
+			Overrides: schemautil.HelmOverrides{Values: map[string]interface{}{"foo": "bar"}},
 			SetValues: map[string]string{
 				"some.key": "somevalue",
 			},
@@ -199,7 +214,7 @@ spec:
       containers:
         - name: skaffold-helm
           image: gcr.io/nick-cloudbuild/skaffold-helm:f759510436c8fd6f7ffa13dd9e9d85e64bec8d2bfd12c5aa3fb9af1288eccdab
-          imagePullPolicy: 
+          imagePullPolicy:
           command: ["/bin/bash", "-c", "--" ]
           args: ["while true; do sleep 30; done;"]
           resources:
@@ -265,33 +280,45 @@ func TestHelmDeploy(t *testing.T) {
 	var tests = []struct {
 		description string
 		cmd         util.Command
-		deployer    *HelmDeployer
+		runContext  *runcontext.RunContext
 		builds      []build.Artifact
 		shouldErr   bool
 	}{
 		{
 			description: "deploy success",
 			cmd:         &MockHelm{t: t},
-			deployer:    NewHelmDeployer(testDeployConfig, testKubeContext, testNamespace, ""),
+			runContext:  makeRunContext(testDeployConfig, false),
 			builds:      testBuilds,
 		},
 		{
 			description: "deploy success with recreatePods",
 			cmd:         &MockHelm{t: t},
-			deployer:    NewHelmDeployer(testDeployRecreatePodsConfig, testKubeContext, testNamespace, ""),
+			runContext:  makeRunContext(testDeployRecreatePodsConfig, false),
 			builds:      testBuilds,
 		},
 		{
-			description: "deploy error unmatched parameter",
+			description: "deploy success with skipBuildDependencies",
 			cmd:         &MockHelm{t: t},
-			deployer:    NewHelmDeployer(testDeployConfigParameterUnmatched, testKubeContext, testNamespace, ""),
+			runContext:  makeRunContext(testDeploySkipBuildDependenciesConfig, false),
+			builds:      testBuilds,
+		},
+		{
+			description: "deploy should not error for unmatched parameter when no builds present",
+			cmd:         &MockHelm{t: t},
+			runContext:  makeRunContext(testDeployConfigParameterUnmatched, false),
+			builds:      nil,
+		},
+		{
+			description: "deploy should error for unmatched parameter when builds present",
+			cmd:         &MockHelm{t: t},
+			runContext:  makeRunContext(testDeployConfigParameterUnmatched, false),
 			builds:      testBuilds,
 			shouldErr:   true,
 		},
 		{
 			description: "deploy success remote chart with skipBuildDependencies",
 			cmd:         &MockHelm{t: t},
-			deployer:    NewHelmDeployer(testDeploySkipBuildDependencies, testKubeContext, testNamespace, ""),
+			runContext:  makeRunContext(testDeploySkipBuildDependencies, false),
 			builds:      testBuilds,
 		},
 		{
@@ -300,9 +327,9 @@ func TestHelmDeploy(t *testing.T) {
 				t:         t,
 				depResult: fmt.Errorf("unexpected error"),
 			},
-			deployer:  NewHelmDeployer(testDeployRemoteChart, testKubeContext, testNamespace, ""),
-			builds:    testBuilds,
-			shouldErr: true,
+			runContext: makeRunContext(testDeployRemoteChart, false),
+			builds:     testBuilds,
+			shouldErr:  true,
 		},
 		{
 			description: "get failure should install not upgrade",
@@ -310,9 +337,9 @@ func TestHelmDeploy(t *testing.T) {
 				t:         t,
 				getResult: fmt.Errorf("not found"),
 				installMatcher: func(cmd *exec.Cmd) bool {
-					expected := map[string]bool{fmt.Sprintf("image=%s", testBuilds[0].Tag): true}
+					expected := fmt.Sprintf("image=%s", testBuilds[0].Tag)
 					for _, arg := range cmd.Args {
-						if expected[arg] {
+						if expected == arg {
 							return true
 						}
 					}
@@ -320,8 +347,8 @@ func TestHelmDeploy(t *testing.T) {
 				},
 				upgradeResult: fmt.Errorf("should not have called upgrade"),
 			},
-			deployer: NewHelmDeployer(testDeployConfig, testKubeContext, testNamespace, ""),
-			builds:   testBuilds,
+			runContext: makeRunContext(testDeployConfig, false),
+			builds:     testBuilds,
 		},
 		{
 			description: "get failure should install not upgrade with helm image strategy",
@@ -334,9 +361,9 @@ func TestHelmDeploy(t *testing.T) {
 						return false
 					}
 
-					expected := map[string]bool{fmt.Sprintf("image.repository=%s,image.tag=%s", dockerRef.BaseName, dockerRef.Tag): true}
+					expected := fmt.Sprintf("image.repository=%s,image.tag=%s", dockerRef.BaseName, dockerRef.Tag)
 					for _, arg := range cmd.Args {
-						if expected[arg] {
+						if expected == arg {
 							return true
 						}
 					}
@@ -344,17 +371,42 @@ func TestHelmDeploy(t *testing.T) {
 				},
 				upgradeResult: fmt.Errorf("should not have called upgrade"),
 			},
-			deployer: NewHelmDeployer(testDeployHelmStyleConfig, testKubeContext, testNamespace, ""),
-			builds:   testBuilds,
+			runContext: makeRunContext(testDeployHelmStyleConfig, false),
+			builds:     testBuilds,
 		},
 		{
-			description: "get success should upgrade not install",
+			description: "get success should upgrade by force, not install",
 			cmd: &MockHelm{
-				t:             t,
+				t: t,
+				upgradeMatcher: func(cmd *exec.Cmd) bool {
+					for _, arg := range cmd.Args {
+						if arg == "--force" {
+							return true
+						}
+					}
+					return false
+				},
 				installResult: fmt.Errorf("should not have called install"),
 			},
-			deployer: NewHelmDeployer(testDeployConfig, testKubeContext, testNamespace, ""),
-			builds:   testBuilds,
+			runContext: makeRunContext(testDeployConfig, true),
+			builds:     testBuilds,
+		},
+		{
+			description: "get success should upgrade without force, not install",
+			cmd: &MockHelm{
+				t: t,
+				upgradeMatcher: func(cmd *exec.Cmd) bool {
+					for _, arg := range cmd.Args {
+						if arg == "--force" {
+							return false
+						}
+					}
+					return true
+				},
+				installResult: fmt.Errorf("should not have called install"),
+			},
+			runContext: makeRunContext(testDeployConfig, false),
+			builds:     testBuilds,
 		},
 		{
 			description: "deploy error",
@@ -362,9 +414,9 @@ func TestHelmDeploy(t *testing.T) {
 				t:             t,
 				upgradeResult: fmt.Errorf("unexpected error"),
 			},
-			shouldErr: true,
-			deployer:  NewHelmDeployer(testDeployConfig, testKubeContext, testNamespace, ""),
-			builds:    testBuilds,
+			shouldErr:  true,
+			runContext: makeRunContext(testDeployConfig, false),
+			builds:     testBuilds,
 		},
 		{
 			description: "dep build error",
@@ -372,9 +424,9 @@ func TestHelmDeploy(t *testing.T) {
 				t:         t,
 				depResult: fmt.Errorf("unexpected error"),
 			},
-			shouldErr: true,
-			deployer:  NewHelmDeployer(testDeployConfig, testKubeContext, testNamespace, ""),
-			builds:    testBuilds,
+			shouldErr:  true,
+			runContext: makeRunContext(testDeployConfig, false),
+			builds:     testBuilds,
 		},
 		{
 			description: "should package chart and deploy",
@@ -382,14 +434,9 @@ func TestHelmDeploy(t *testing.T) {
 				t:          t,
 				packageOut: bytes.NewBufferString("Packaged to " + os.TempDir() + "foo-0.1.2.tgz"),
 			},
-			shouldErr: false,
-			deployer: NewHelmDeployer(
-				testDeployFooWithPackaged,
-				testKubeContext,
-				testNamespace,
-				"",
-			),
-			builds: testBuildsFoo,
+			shouldErr:  false,
+			runContext: makeRunContext(testDeployFooWithPackaged, false),
+			builds:     testBuildsFoo,
 		},
 		{
 			description: "should fail to deploy when packaging fails",
@@ -397,31 +444,25 @@ func TestHelmDeploy(t *testing.T) {
 				t:             t,
 				packageResult: fmt.Errorf("packaging failed"),
 			},
-			shouldErr: true,
-			deployer: NewHelmDeployer(
-				testDeployFooWithPackaged,
-				testKubeContext,
-				testNamespace,
-				"",
-			),
-			builds: testBuildsFoo,
+			shouldErr:  true,
+			runContext: makeRunContext(testDeployFooWithPackaged, false),
+			builds:     testBuildsFoo,
 		},
 		{
 			description: "deploy and get templated release name",
 			cmd:         &MockHelm{t: t},
-			deployer:    NewHelmDeployer(testDeployWithTemplatedName, testKubeContext, testNamespace, ""),
+			runContext:  makeRunContext(testDeployWithTemplatedName, false),
 			builds:      testBuilds,
 		},
 	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&util.DefaultExecCommand, test.cmd)
 
-	for _, tt := range tests {
-		t.Run(tt.description, func(t *testing.T) {
-			defer func(c util.Command) { util.DefaultExecCommand = c }(util.DefaultExecCommand)
-			util.DefaultExecCommand = tt.cmd
+			event.InitializeState(test.runContext)
+			err := NewHelmDeployer(test.runContext).Deploy(context.Background(), ioutil.Discard, test.builds, nil)
 
-			_, err := tt.deployer.Deploy(context.Background(), ioutil.Discard, tt.builds)
-
-			testutil.CheckError(t, tt.shouldErr, err)
+			t.CheckError(test.shouldErr, err)
 		})
 	}
 }
@@ -496,29 +537,29 @@ func (m *MockHelm) RunCmd(c *exec.Cmd) error {
 
 func TestParseHelmRelease(t *testing.T) {
 	var tests = []struct {
-		name      string
-		yaml      []byte
-		shouldErr bool
+		description string
+		yaml        []byte
+		shouldErr   bool
 	}{
 		{
-			name: "parse valid deployment yaml",
-			yaml: []byte(validDeployYaml),
+			description: "parse valid deployment yaml",
+			yaml:        []byte(validDeployYaml),
 		},
 		{
-			name: "parse valid service yaml",
-			yaml: []byte(validServiceYaml),
+			description: "parse valid service yaml",
+			yaml:        []byte(validServiceYaml),
 		},
 		{
-			name:      "parse invalid deployment yaml",
-			yaml:      []byte(invalidDeployYaml),
-			shouldErr: true,
+			description: "parse invalid deployment yaml",
+			yaml:        []byte(invalidDeployYaml),
+			shouldErr:   true,
 		},
 	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			_, err := parseRuntimeObject(testNamespace, test.yaml)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseRuntimeObject(testNamespace, tt.yaml)
-			testutil.CheckError(t, tt.shouldErr, err)
+			t.CheckError(test.shouldErr, err)
 		})
 	}
 }
@@ -534,52 +575,129 @@ func TestExtractChartFilename(t *testing.T) {
 
 func TestHelmDependencies(t *testing.T) {
 	var tests = []struct {
-		description string
-		files       []string
-		valuesFiles []string
-		expected    func(folder *testutil.TempDir) []string
+		description           string
+		files                 []string
+		valuesFiles           []string
+		skipBuildDependencies bool
+		remote                bool
+		expected              func(folder *testutil.TempDir) []string
 	}{
 		{
-			description: "charts dir is excluded",
-			files:       []string{"Chart.yaml", "charts/xyz.tar", "templates/deploy.yaml"},
+			description:           "charts dir is included when skipBuildDependencies is true",
+			files:                 []string{"Chart.yaml", "charts/xyz.tar", "templates/deploy.yaml"},
+			skipBuildDependencies: true,
+			expected: func(folder *testutil.TempDir) []string {
+				return []string{folder.Path("Chart.yaml"), folder.Path("charts/xyz.tar"), folder.Path("templates/deploy.yaml")}
+			},
+		},
+		{
+			description:           "charts dir is excluded when skipBuildDependencies is false",
+			files:                 []string{"Chart.yaml", "charts/xyz.tar", "templates/deploy.yaml"},
+			skipBuildDependencies: false,
 			expected: func(folder *testutil.TempDir) []string {
 				return []string{folder.Path("Chart.yaml"), folder.Path("templates/deploy.yaml")}
 			},
 		},
 		{
-			description: "values file is included",
-			files:       []string{"Chart.yaml"},
-			valuesFiles: []string{"/folder/values.yaml"},
+			description:           "values file is included",
+			skipBuildDependencies: false,
+			files:                 []string{"Chart.yaml"},
+			valuesFiles:           []string{"/folder/values.yaml"},
 			expected: func(folder *testutil.TempDir) []string {
 				return []string{"/folder/values.yaml", folder.Path("Chart.yaml")}
 			},
 		},
+		{
+			description:           "no deps for remote chart path",
+			skipBuildDependencies: false,
+			files:                 []string{"Chart.yaml"},
+			remote:                true,
+			expected: func(folder *testutil.TempDir) []string {
+				return nil
+			},
+		},
 	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpDir := t.NewTempDir().
+				Touch(test.files...)
 
-	for _, tt := range tests {
-		t.Run(tt.description, func(t *testing.T) {
-			folder, cleanup := testutil.NewTempDir(t)
-			defer cleanup()
-			for _, file := range tt.files {
-				folder.Write(file, "")
-			}
-
-			deployer := NewHelmDeployer(&latest.HelmDeploy{
+			deployer := NewHelmDeployer(makeRunContext(&latest.HelmDeploy{
 				Releases: []latest.HelmRelease{
 					{
-						Name:        "skaffold-helm",
-						ChartPath:   folder.Root(),
-						ValuesFiles: tt.valuesFiles,
-						Values:      map[string]string{"image": "skaffold-helm"},
-						Overrides:   map[string]interface{}{"foo": "bar"},
-						SetValues:   map[string]string{"some.key": "somevalue"},
+						Name:                  "skaffold-helm",
+						ChartPath:             tmpDir.Root(),
+						ValuesFiles:           test.valuesFiles,
+						Values:                map[string]string{"image": "skaffold-helm"},
+						Overrides:             schemautil.HelmOverrides{Values: map[string]interface{}{"foo": "bar"}},
+						SetValues:             map[string]string{"some.key": "somevalue"},
+						SkipBuildDependencies: test.skipBuildDependencies,
+						Remote:                test.remote,
 					},
 				},
-			}, testKubeContext, testNamespace, "")
+			}, false))
 
 			deps, err := deployer.Dependencies()
 
-			testutil.CheckErrorAndDeepEqual(t, false, err, tt.expected(folder), deps)
+			t.CheckNoError(err)
+			t.CheckDeepEqual(test.expected(tmpDir), deps)
 		})
+	}
+}
+
+func TestExpandPaths(t *testing.T) {
+	homedir.DisableCache = true // for testing only
+
+	var tests = []struct {
+		description  string
+		paths        []string
+		unixExpanded []string //unix expands path with forward slashes, windows with backward slashes
+		winExpanded  []string
+		env          map[string]string
+	}{
+		{
+			description:  "expand paths on unix",
+			paths:        []string{"~/path/with/tilde/values.yaml", "/some/absolute/path/values.yaml"},
+			unixExpanded: []string{"/home/path/with/tilde/values.yaml", "/some/absolute/path/values.yaml"},
+			winExpanded:  []string{`\home\path\with\tilde\values.yaml`, "/some/absolute/path/values.yaml"},
+			env:          map[string]string{"HOME": "/home"},
+		},
+		{
+			description:  "expand paths on windows",
+			paths:        []string{"~/path/with/tilde/values.yaml", `C:\Users\SomeUser\path\values.yaml`},
+			unixExpanded: []string{`C:\Users\SomeUser/path/with/tilde/values.yaml`, `C:\Users\SomeUser\path\values.yaml`},
+			winExpanded:  []string{`C:\Users\SomeUser\path\with\tilde\values.yaml`, `C:\Users\SomeUser\path\values.yaml`},
+			env:          map[string]string{"HOME": `C:\Users\SomeUser`},
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.SetEnvs(test.env)
+			expanded := expandPaths(test.paths)
+
+			if runtime.GOOS == "windows" {
+				t.CheckDeepEqual(test.winExpanded, expanded)
+			} else {
+				t.CheckDeepEqual(test.unixExpanded, expanded)
+			}
+		})
+	}
+}
+
+func makeRunContext(helmDeploy *latest.HelmDeploy, force bool) *runcontext.RunContext {
+	return &runcontext.RunContext{
+		Cfg: &latest.Pipeline{
+			Deploy: latest.DeployConfig{
+				DeployType: latest.DeployType{
+					HelmDeploy: helmDeploy,
+				},
+			},
+		},
+		KubeContext: testKubeContext,
+		Opts: &config.SkaffoldOptions{
+			Namespace: testNamespace,
+			Force:     force,
+		},
 	}
 }

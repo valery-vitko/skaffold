@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,11 +26,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
 // Client is for tests
@@ -41,6 +43,7 @@ var DynamicClient = GetDynamicClient
 type LogAggregator struct {
 	output      io.Writer
 	podSelector PodSelector
+	namespaces  []string
 	colorPicker ColorPicker
 
 	muted             int32
@@ -50,10 +53,11 @@ type LogAggregator struct {
 }
 
 // NewLogAggregator creates a new LogAggregator for a given output.
-func NewLogAggregator(out io.Writer, baseImageNames []string, podSelector PodSelector) *LogAggregator {
+func NewLogAggregator(out io.Writer, baseImageNames []string, podSelector PodSelector, namespaces []string) *LogAggregator {
 	return &LogAggregator{
 		output:      out,
 		podSelector: podSelector,
+		namespaces:  namespaces,
 		colorPicker: NewColorPicker(baseImageNames),
 		trackedContainers: trackedContainers{
 			ids: map[string]bool{},
@@ -68,19 +72,21 @@ func (a *LogAggregator) Start(ctx context.Context) error {
 	a.cancel = cancel
 	a.startTime = time.Now()
 
-	watcher, err := PodWatcher()
+	aggregate := make(chan watch.Event)
+	stopWatchers, err := AggregatePodWatcher(a.namespaces, aggregate)
 	if err != nil {
-		return errors.Wrap(err, "initializing pod watcher")
+		stopWatchers()
+		return errors.Wrap(err, "initializing aggregate pod watcher")
 	}
 
 	go func() {
-		defer watcher.Stop()
+		defer stopWatchers()
 
 		for {
 			select {
 			case <-cancelCtx.Done():
 				return
-			case evt, ok := <-watcher.ResultChan():
+			case evt, ok := <-aggregate:
 				if !ok {
 					return
 				}
@@ -98,8 +104,16 @@ func (a *LogAggregator) Start(ctx context.Context) error {
 					continue
 				}
 
-				for _, container := range pod.Status.ContainerStatuses {
+				for _, container := range append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...) {
 					if container.ContainerID == "" {
+						if container.State.Waiting != nil && container.State.Waiting.Message != "" {
+							color.Red.Fprintln(a.output, container.State.Waiting.Message)
+						}
+						continue
+					}
+
+					if container.State.Terminated != nil {
+						color.Purple.Fprintln(a.output, container.State.Terminated.Message)
 						continue
 					}
 
@@ -116,7 +130,9 @@ func (a *LogAggregator) Start(ctx context.Context) error {
 
 // Stop stops the logger.
 func (a *LogAggregator) Stop() {
-	a.cancel()
+	if a.cancel != nil {
+		a.cancel()
+	}
 }
 
 func sinceSeconds(d time.Duration) int64 {
@@ -140,7 +156,7 @@ func (a *LogAggregator) streamContainerLogs(ctx context.Context, pod *v1.Pod, co
 	tr, tw := io.Pipe()
 	cmd := exec.CommandContext(ctx, "kubectl", "logs", sinceSeconds, "-f", pod.Name, "-c", container.Name, "--namespace", pod.Namespace)
 	cmd.Stdout = tw
-	go cmd.Run()
+	go util.RunCmd(cmd)
 
 	color := a.colorPicker.Pick(pod)
 	prefix := prefix(pod, container)

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,16 +22,40 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 )
 
-// PodWatcher returns a watcher that will report on all Pod Events (additions, modifications, etc.)
-func PodWatcher() (watch.Interface, error) {
+// AggregatePodWatcher returns a watcher for multiple namespaces.
+func AggregatePodWatcher(namespaces []string, aggregate chan<- watch.Event) (func(), error) {
+	watchers := make([]watch.Interface, 0, len(namespaces))
+	stopWatchers := func() {
+		for _, w := range watchers {
+			w.Stop()
+		}
+	}
+
 	kubeclient, err := Client()
 	if err != nil {
-		return nil, errors.Wrap(err, "getting k8s client")
+		return func() {}, errors.Wrap(err, "getting k8s client")
 	}
-	client := kubeclient.CoreV1()
+
 	var forever int64 = 3600 * 24 * 365 * 100
-	return client.Pods("").Watch(meta_v1.ListOptions{
-		IncludeUninitialized: true,
-		TimeoutSeconds:       &forever,
-	})
+
+	for _, ns := range namespaces {
+		watcher, err := kubeclient.CoreV1().Pods(ns).Watch(meta_v1.ListOptions{
+			IncludeUninitialized: true,
+			TimeoutSeconds:       &forever,
+		})
+		if err != nil {
+			stopWatchers()
+			return func() {}, errors.Wrap(err, "initializing pod watcher for "+ns)
+		}
+
+		watchers = append(watchers, watcher)
+
+		go func() {
+			for msg := range watcher.ResultChan() {
+				aggregate <- msg
+			}
+		}()
+	}
+
+	return stopWatchers, nil
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@ package test
 import (
 	"context"
 	"io"
-	"os"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	runcontext "github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/context"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/test/structure"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
@@ -32,28 +32,18 @@ import (
 // NewTester parses the provided test cases from the Skaffold config,
 // and returns a Tester instance with all the necessary test runners
 // to run all specified tests.
-func NewTester(testCases *latest.TestConfig) (Tester, error) {
-	// TODO(nkubala): copied this from runner.getDeployer(), this should be moved somewhere else
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, errors.Wrap(err, "finding current directory")
-	}
-
+func NewTester(runCtx *runcontext.RunContext) Tester {
 	return FullTester{
-		testCases:  testCases,
-		workingDir: cwd,
-	}, nil
+		testCases:  runCtx.Cfg.Test,
+		workingDir: runCtx.WorkingDir,
+	}
 }
 
 // TestDependencies returns the watch dependencies to the runner.
 func (t FullTester) TestDependencies() ([]string, error) {
 	var deps []string
 
-	for _, test := range *t.testCases {
-		if test.StructureTests == nil {
-			continue
-		}
-
+	for _, test := range t.testCases {
 		files, err := util.ExpandPathsGlob(t.workingDir, test.StructureTests)
 		if err != nil {
 			return nil, errors.Wrap(err, "expanding test file paths")
@@ -68,7 +58,7 @@ func (t FullTester) TestDependencies() ([]string, error) {
 // Test is the top level testing execution call. It serves as the
 // entrypoint to all individual tests.
 func (t FullTester) Test(ctx context.Context, out io.Writer, bRes []build.Artifact) error {
-	for _, test := range *t.testCases {
+	for _, test := range t.testCases {
 		if err := t.runStructureTests(ctx, out, bRes, test); err != nil {
 			return errors.Wrap(err, "running structure tests")
 		}
@@ -87,9 +77,9 @@ func (t FullTester) runStructureTests(ctx context.Context, out io.Writer, bRes [
 		return errors.Wrap(err, "expanding test file paths")
 	}
 
-	runner := structure.NewRunner(files)
 	fqn := resolveArtifactImageTag(testCase.ImageName, bRes)
 
+	runner := structure.NewRunner(files)
 	return runner.Test(ctx, out, fqn)
 }
 

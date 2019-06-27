@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,16 +23,11 @@ import (
 )
 
 func TestCustomTag_GenerateFullyQualifiedImageName(t *testing.T) {
-	opts := &Options{
-		ImageName: "test",
-		Digest:    "sha256:12345abcde",
-	}
-
-	expectedTag := "1.2.3-beta"
-
 	c := &CustomTag{
-		Tag: expectedTag,
+		Tag: "1.2.3-beta",
 	}
-	tag, err := c.GenerateFullyQualifiedImageName(".", opts)
-	testutil.CheckErrorAndDeepEqual(t, false, err, "test:"+expectedTag, tag)
+
+	tag, err := c.GenerateFullyQualifiedImageName(".", "test")
+
+	testutil.CheckErrorAndDeepEqual(t, false, err, "test:1.2.3-beta", tag)
 }

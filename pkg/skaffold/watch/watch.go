@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,9 @@ package watch
 
 import (
 	"context"
+	"io"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/pkg/errors"
 )
@@ -28,14 +31,19 @@ type Factory func() Watcher
 // Watcher monitors files changes for multiples components.
 type Watcher interface {
 	Register(deps func() ([]string, error), onChange func(Events)) error
-	Run(ctx context.Context, trigger Trigger, onChange func() error) error
+	Run(ctx context.Context, out io.Writer, onChange func() error) error
 }
 
-type watchList []*component
+type watchList struct {
+	components []*component
+	trigger    Trigger
+}
 
 // NewWatcher creates a new Watcher.
-func NewWatcher() Watcher {
-	return &watchList{}
+func NewWatcher(trigger Trigger) Watcher {
+	return &watchList{
+		trigger: trigger,
+	}
 }
 
 type component struct {
@@ -52,7 +60,7 @@ func (w *watchList) Register(deps func() ([]string, error), onChange func(Events
 		return errors.Wrap(err, "listing files")
 	}
 
-	*w = append(*w, &component{
+	w.components = append(w.components, &component{
 		deps:     deps,
 		onChange: onChange,
 		state:    state,
@@ -61,19 +69,35 @@ func (w *watchList) Register(deps func() ([]string, error), onChange func(Events
 }
 
 // Run watches files until the context is cancelled or an error occurs.
-func (w *watchList) Run(ctx context.Context, trigger Trigger, onChange func() error) error {
-	t, cleanup := trigger.Start()
-	defer cleanup()
+func (w *watchList) Run(ctx context.Context, out io.Writer, onChange func() error) error {
+	ctxTrigger, cancelTrigger := context.WithCancel(ctx)
+	defer cancelTrigger()
+
+	t, err := w.trigger.Start(ctxTrigger)
+	if err != nil {
+		if notifyTrigger, ok := w.trigger.(*fsNotifyTrigger); ok {
+			w.trigger = &pollTrigger{
+				Interval: notifyTrigger.Interval,
+			}
+
+			logrus.Debugln("Couldn't start notify trigger. Falling back to a polling trigger")
+			t, err = w.trigger.Start(ctxTrigger)
+		}
+	}
+	if err != nil {
+		return errors.Wrap(err, "unable to start trigger")
+	}
 
 	changedComponents := map[int]bool{}
 
+	w.trigger.WatchForChanges(out)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-t:
 			changed := 0
-			for i, component := range *w {
+			for i, component := range w.components {
 				state, err := Stat(component.deps)
 				if err != nil {
 					return errors.Wrap(err, "listing files")
@@ -93,9 +117,9 @@ func (w *watchList) Run(ctx context.Context, trigger Trigger, onChange func() er
 			// To prevent that, we debounce changes that happen too quickly
 			// by waiting for a full turn where nothing happens and trigger a rebuild for
 			// the accumulated changes.
-			debounce := trigger.Debounce()
+			debounce := w.trigger.Debounce()
 			if (!debounce && changed > 0) || (debounce && changed == 0 && len(changedComponents) > 0) {
-				for i, component := range *w {
+				for i, component := range w.components {
 					if changedComponents[i] {
 						component.onChange(component.events)
 					}
@@ -106,6 +130,7 @@ func (w *watchList) Run(ctx context.Context, trigger Trigger, onChange func() er
 				}
 
 				changedComponents = map[int]bool{}
+				w.trigger.WatchForChanges(out)
 			}
 		}
 	}

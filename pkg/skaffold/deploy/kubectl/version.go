@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,10 +21,11 @@ import (
 	"encoding/json"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/warnings"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 const unknown = "unknown"
@@ -49,19 +50,25 @@ func (v ClientVersion) String() string {
 }
 
 // CheckVersion warns the user if their kubectl version is < 1.12.0
-func (c *CLI) CheckVersion() error {
-	m, err := strconv.Atoi(c.Version().Minor)
+func (c *CLI) CheckVersion(ctx context.Context) error {
+	minor := c.Version(ctx).Minor
+
+	// Some patched versions get a '+' suffix.
+	minor = strings.TrimRight(minor, "+")
+
+	m, err := strconv.Atoi(minor)
 	if err != nil {
 		return errors.Wrap(err, "couldn't get kubectl minor version")
 	}
+
 	if m < 12 {
-		return errors.New("kubectl version 1.12.0 or greater is recommended for use with skaffold")
+		return errors.New("kubectl version 1.12.0 or greater is recommended for use with Skaffold")
 	}
 	return nil
 }
 
 // Version returns the client version of kubectl.
-func (c *CLI) Version() ClientVersion {
+func (c *CLI) Version(ctx context.Context) ClientVersion {
 	c.versionOnce.Do(func() {
 		version := Version{
 			Client: ClientVersion{
@@ -70,11 +77,11 @@ func (c *CLI) Version() ClientVersion {
 			},
 		}
 
-		buf, err := c.getVersion(context.Background())
+		buf, err := c.getVersion(ctx)
 		if err != nil {
-			logrus.Warnln("unable to get kubectl client version", err)
+			warnings.Printf("unable to get kubectl client version: %v", err)
 		} else if err := json.Unmarshal(buf, &version); err != nil {
-			logrus.Warnln("unable to parse client version", err)
+			warnings.Printf("unable to parse client version: %v", err)
 		}
 
 		c.version = version.Client

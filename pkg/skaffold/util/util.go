@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,18 +20,26 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	yaml "gopkg.in/yaml.v2"
+)
+
+const (
+	hiddenPrefix string = "."
 )
 
 func RandomID() string {
@@ -59,12 +67,24 @@ func IsSupportedKubernetesFormat(n string) bool {
 }
 
 func StrSliceContains(sl []string, s string) bool {
-	for _, a := range sl {
+	return StrSliceIndex(sl, s) >= 0
+}
+
+func StrSliceIndex(sl []string, s string) int {
+	for i, a := range sl {
 		if a == s {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+func StrSliceInsert(sl []string, index int, insert []string) []string {
+	newSlice := make([]string, len(sl)+len(insert))
+	copy(newSlice[0:index], sl[0:index])
+	copy(newSlice[index:index+len(insert)], insert)
+	copy(newSlice[index+len(insert):], sl[index:])
+	return newSlice
 }
 
 // ExpandPathsGlob expands paths according to filepath.Glob patterns
@@ -72,6 +92,12 @@ func StrSliceContains(sl []string, s string) bool {
 func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 	expandedPaths := make(map[string]bool)
 	for _, p := range paths {
+		if filepath.IsAbs(p) {
+			// This is a absolute file reference
+			expandedPaths[p] = true
+			continue
+		}
+
 		path := filepath.Join(workingDir, p)
 
 		if _, err := os.Stat(path); err == nil {
@@ -84,8 +110,8 @@ func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "glob")
 		}
-		if files == nil {
-			return nil, fmt.Errorf("file pattern must match at least one file %s", path)
+		if len(files) == 0 {
+			logrus.Warnf("%s did not match any file", p)
 		}
 
 		for _, f := range files {
@@ -110,17 +136,6 @@ func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 	return ret, nil
 }
 
-// HasMeta reports whether path contains any of the magic characters
-// recognized by filepath.Match.
-// This is a copy of filepath/match.go's hasMeta
-func HasMeta(path string) bool {
-	magicChars := `*?[`
-	if runtime.GOOS != "windows" {
-		magicChars = `*?[\`
-	}
-	return strings.ContainsAny(path, magicChars)
-}
-
 // BoolPtr returns a pointer to a bool
 func BoolPtr(b bool) *bool {
 	o := b
@@ -133,31 +148,11 @@ func StringPtr(s string) *string {
 	return &o
 }
 
-func ReadConfiguration(filename string) ([]byte, error) {
-	switch {
-	case filename == "":
-		return nil, errors.New("filename not specified")
-	case filename == "-":
-		return ioutil.ReadAll(os.Stdin)
-	case strings.HasPrefix(filename, "http://") || strings.HasPrefix(filename, "https://"):
-		return download(filename)
-	default:
-		directory := filepath.Dir(filename)
-		baseName := filepath.Base(filename)
-		if baseName != "skaffold.yaml" {
-			return ioutil.ReadFile(filename)
-		}
-		contents, err := ioutil.ReadFile(filename)
-		if err != nil {
-			logrus.Infof("Could not open skaffold.yaml: \"%s\"", err)
-			logrus.Infof("Trying to read from skaffold.yml instead")
-			return ioutil.ReadFile(filepath.Join(directory, "skaffold.yml"))
-		}
-		return contents, err
-	}
+func IsURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
-func download(url string) ([]byte, error) {
+func Download(url string) ([]byte, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
@@ -186,9 +181,9 @@ func VerifyOrCreateFile(path string) error {
 
 // RemoveFromSlice removes a string from a slice of strings
 func RemoveFromSlice(s []string, target string) []string {
-	for i, val := range s {
-		if val == target {
-			return append(s[:i], s[i+1:]...)
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == target {
+			s = append(s[:i], s[i+1:]...)
 		}
 	}
 	return s
@@ -240,4 +235,70 @@ func NonEmptyLines(input []byte) []string {
 		}
 	}
 	return result
+}
+
+// SHA256 returns the shasum of the contents of r
+func SHA256(r io.Reader) (string, error) {
+	hasher := sha256.New()
+	_, err := io.Copy(hasher, r)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(make([]byte, 0, hasher.Size()))), nil
+}
+
+// CloneThroughJSON marshals the old interface into the new one
+func CloneThroughJSON(old interface{}, new interface{}) error {
+	o, err := json.Marshal(old)
+	if err != nil {
+		return errors.Wrap(err, "marshalling old")
+	}
+	if err := json.Unmarshal(o, &new); err != nil {
+		return errors.Wrap(err, "unmarshalling new")
+	}
+	return nil
+}
+
+// CloneThroughYAML marshals the old interface into the new one
+func CloneThroughYAML(old interface{}, new interface{}) error {
+	contents, err := yaml.Marshal(old)
+	if err != nil {
+		return errors.Wrap(err, "unmarshalling properties")
+	}
+	if err := yaml.Unmarshal(contents, new); err != nil {
+		return errors.Wrap(err, "unmarshalling bazel artifact")
+	}
+	return nil
+}
+
+// AbsolutePaths prepends each path in paths with workspace if the path isn't absolute
+func AbsolutePaths(workspace string, paths []string) []string {
+	var p []string
+	for _, path := range paths {
+		// TODO(dgageot): this is only done for jib builder.
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workspace, path)
+		}
+		p = append(p, path)
+	}
+	return p
+}
+
+// IsHiddenDir returns if a directory is hidden.
+func IsHiddenDir(filename string) bool {
+	// Return false for current dir
+	if filename == hiddenPrefix {
+		return false
+	}
+	return hasHiddenPrefix(filename)
+}
+
+// IsHiddenFile returns if a file is hidden.
+// File is hidden if it starts with prefix "."
+func IsHiddenFile(filename string) bool {
+	return hasHiddenPrefix(filename)
+}
+
+func hasHiddenPrefix(s string) bool {
+	return strings.HasPrefix(s, hiddenPrefix)
 }

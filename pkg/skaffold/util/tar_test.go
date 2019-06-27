@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,57 +19,238 @@ package util
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"io"
 	"io/ioutil"
+	"runtime"
 	"testing"
 
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
-func Test_addFileToTar(t *testing.T) {
-	tmpDir, cleanup := testutil.NewTempDir(t)
-	defer cleanup()
+func TestCreateTar(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		files := map[string]string{
+			"foo":     "baz1",
+			"bar/bat": "baz2",
+			"bar/baz": "baz3",
+		}
+		_, paths := prepareFiles(t, files)
 
-	files := map[string]string{
-		"foo":     "baz1",
-		"bar/bat": "baz2",
-		"bar/baz": "baz3",
-	}
-	for p, c := range files {
-		tmpDir.Write(p, c)
+		var b bytes.Buffer
+		err := CreateTar(&b, ".", paths)
+		t.CheckNoError(err)
+
+		// Make sure the contents match.
+		tarFiles := make(map[string]string)
+		tr := tar.NewReader(&b)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			t.CheckNoError(err)
+
+			content, err := ioutil.ReadAll(tr)
+			t.CheckNoError(err)
+
+			tarFiles[hdr.Name] = string(content)
+		}
+
+		t.CheckDeepEqual(files, tarFiles)
+	})
+}
+
+func TestCreateTarGz(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		files := map[string]string{
+			"foo":     "baz1",
+			"bar/bat": "baz2",
+			"bar/baz": "baz3",
+		}
+		_, paths := prepareFiles(t, files)
+
+		var b bytes.Buffer
+		err := CreateTarGz(&b, ".", paths)
+		t.CheckNoError(err)
+
+		// Make sure the contents match.
+		tarFiles := make(map[string]string)
+		gzr, err := gzip.NewReader(&b)
+		t.CheckNoError(err)
+		tr := tar.NewReader(gzr)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			t.CheckNoError(err)
+
+			content, err := ioutil.ReadAll(tr)
+			t.CheckNoError(err)
+
+			tarFiles[hdr.Name] = string(content)
+		}
+
+		t.CheckDeepEqual(files, tarFiles)
+	})
+}
+
+func TestCreateTarSubDirectory(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		files := map[string]string{
+			"sub/foo":     "baz1",
+			"sub/bar/bat": "baz2",
+			"sub/bar/baz": "baz3",
+		}
+		_, paths := prepareFiles(t, files)
+
+		var b bytes.Buffer
+		err := CreateTar(&b, "sub", paths)
+		t.CheckNoError(err)
+
+		// Make sure the contents match.
+		tarFiles := make(map[string]string)
+		tr := tar.NewReader(&b)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			t.CheckNoError(err)
+
+			content, err := ioutil.ReadAll(tr)
+			t.CheckNoError(err)
+
+			tarFiles["sub/"+hdr.Name] = string(content)
+		}
+
+		t.CheckDeepEqual(files, tarFiles)
+	})
+}
+
+func TestCreateTarEmptyFolder(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		t.NewTempDir().
+			Mkdir("empty").
+			Chdir()
+
+		var b bytes.Buffer
+		err := CreateTar(&b, ".", []string{"empty"})
+		t.CheckNoError(err)
+
+		// Make sure the contents match.
+		var tarFolders []string
+		tr := tar.NewReader(&b)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			t.CheckNoError(err)
+
+			if hdr.FileInfo().IsDir() {
+				tarFolders = append(tarFolders, hdr.Name)
+			}
+		}
+
+		t.CheckNoError(err)
+		t.CheckDeepEqual([]string{"empty"}, tarFolders)
+	})
+}
+
+func TestCreateTarWithAbsolutePaths(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		files := map[string]string{
+			"foo":     "baz1",
+			"bar/bat": "baz2",
+			"bar/baz": "baz3",
+		}
+		tmpDir, paths := prepareFiles(t, files)
+
+		var b bytes.Buffer
+		err := CreateTar(&b, tmpDir.Root(), tmpDir.Paths(paths...))
+		t.CheckNoError(err)
+
+		// Make sure the contents match.
+		tarFiles := make(map[string]string)
+		tr := tar.NewReader(&b)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			t.CheckNoError(err)
+
+			content, err := ioutil.ReadAll(tr)
+			t.CheckNoError(err)
+
+			tarFiles[hdr.Name] = string(content)
+		}
+
+		t.CheckDeepEqual(files, tarFiles)
+	})
+}
+
+func TestAddFileToTarSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires extra privileges on Windows")
 	}
 
-	// Add all the files to a tar.
-	var b bytes.Buffer
-	tw := tar.NewWriter(&b)
-	for p := range files {
-		path := tmpDir.Path(p)
-		if err := addFileToTar(path, p, tw); err != nil {
-			t.Fatalf("addFileToTar() error = %v", err)
+	testutil.Run(t, "", func(t *testutil.T) {
+		files := map[string]string{
+			"foo":     "baz1",
+			"bar/bat": "baz2",
+			"bar/baz": "baz3",
 		}
-	}
-	tw.Close()
+		tmpDir, paths := prepareFiles(t, files)
 
-	// Make sure the contents match.
-	tr := tar.NewReader(&b)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
+		links := map[string]string{
+			"foo.link":     "foo",
+			"bat.link":     "bar/bat",
+			"bat/baz.link": "bar/baz",
 		}
-		if err != nil {
-			t.Errorf("Error reading tar: %s", err)
+		for link, file := range links {
+			tmpDir.Symlink(file, link)
+			paths = append(paths, link)
 		}
-		expectedContents, ok := files[hdr.Name]
-		if !ok {
-			t.Errorf("Unexpected file in tar: %s", hdr.Name)
+
+		var b bytes.Buffer
+		err := CreateTar(&b, tmpDir.Root(), tmpDir.Paths(paths...))
+		t.CheckNoError(err)
+
+		// Make sure the links match.
+		tr := tar.NewReader(&b)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			t.CheckNoError(err)
+
+			if _, isFile := files[hdr.Name]; isFile {
+				continue
+			}
+
+			link, isLink := links[hdr.Name]
+			if !isLink {
+				t.Errorf("Unexpected file/link in tar: %s", hdr.Name)
+			}
+			if hdr.Linkname != link {
+				t.Errorf("Link destination doesn't match. %s != %s.", link, hdr.Linkname)
+			}
 		}
-		actualContents, err := ioutil.ReadAll(tr)
-		if err != nil {
-			t.Errorf("Error %s reading file %s from tar", err, hdr.Name)
-		}
-		if expectedContents != string(actualContents) {
-			t.Errorf("File contents don't match. %s != %s", actualContents, expectedContents)
-		}
+	})
+}
+
+func prepareFiles(t *testutil.T, files map[string]string) (*testutil.TempDir, []string) {
+	tmpDir := t.NewTempDir().Chdir()
+
+	var paths []string
+	for path, content := range files {
+		tmpDir.Write(path, content)
+		paths = append(paths, path)
 	}
+
+	return tmpDir, paths
 }

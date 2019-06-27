@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,12 +22,12 @@ import (
 
 const Version string = "skaffold/v1alpha5"
 
-// NewSkaffoldPipeline creates a SkaffoldPipeline
-func NewSkaffoldPipeline() util.VersionedConfig {
-	return new(SkaffoldPipeline)
+// NewSkaffoldConfig creates a SkaffoldConfig
+func NewSkaffoldConfig() util.VersionedConfig {
+	return new(SkaffoldConfig)
 }
 
-type SkaffoldPipeline struct {
+type SkaffoldConfig struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 
@@ -37,7 +37,7 @@ type SkaffoldPipeline struct {
 	Profiles []Profile    `yaml:"profiles,omitempty"`
 }
 
-func (c *SkaffoldPipeline) GetVersion() string {
+func (c *SkaffoldConfig) GetVersion() string {
 	return c.APIVersion
 }
 
@@ -181,19 +181,19 @@ type KustomizeDeploy struct {
 }
 
 type HelmRelease struct {
-	Name              string                 `yaml:"name,omitempty"`
-	ChartPath         string                 `yaml:"chartPath,omitempty"`
-	ValuesFiles       []string               `yaml:"valuesFiles,omitempty"`
-	Values            map[string]string      `yaml:"values,omitempty,omitempty"`
-	Namespace         string                 `yaml:"namespace,omitempty"`
-	Version           string                 `yaml:"version,omitempty"`
-	SetValues         map[string]string      `yaml:"setValues,omitempty"`
-	SetValueTemplates map[string]string      `yaml:"setValueTemplates,omitempty"`
-	Wait              bool                   `yaml:"wait,omitempty"`
-	RecreatePods      bool                   `yaml:"recreatePods,omitempty"`
-	Overrides         map[string]interface{} `yaml:"overrides,omitempty"`
-	Packaged          *HelmPackaged          `yaml:"packaged,omitempty"`
-	ImageStrategy     HelmImageStrategy      `yaml:"imageStrategy,omitempty"`
+	Name              string             `yaml:"name,omitempty"`
+	ChartPath         string             `yaml:"chartPath,omitempty"`
+	ValuesFiles       []string           `yaml:"valuesFiles,omitempty"`
+	Values            map[string]string  `yaml:"values,omitempty,omitempty"`
+	Namespace         string             `yaml:"namespace,omitempty"`
+	Version           string             `yaml:"version,omitempty"`
+	SetValues         map[string]string  `yaml:"setValues,omitempty"`
+	SetValueTemplates map[string]string  `yaml:"setValueTemplates,omitempty"`
+	Wait              bool               `yaml:"wait,omitempty"`
+	RecreatePods      bool               `yaml:"recreatePods,omitempty"`
+	Overrides         util.HelmOverrides `yaml:"overrides,omitempty"`
+	Packaged          *HelmPackaged      `yaml:"packaged,omitempty"`
+	ImageStrategy     HelmImageStrategy  `yaml:"imageStrategy,omitempty"`
 }
 
 // HelmPackaged represents parameters for packaging helm chart.
@@ -210,8 +210,8 @@ type HelmImageStrategy struct {
 }
 
 type HelmImageConfig struct {
-	HelmFQNConfig        *HelmFQNConfig        `yaml:"fqn,omitempty"`
-	HelmConventionConfig *HelmConventionConfig `yaml:"helm,omitempty"`
+	HelmFQNConfig        *HelmFQNConfig        `yaml:"fqn,omitempty" yamltags:"oneOf=helmImageStrategy"`
+	HelmConventionConfig *HelmConventionConfig `yaml:"helm,omitempty" yamltags:"oneOf=helmImageStrategy"`
 }
 
 // HelmFQNConfig represents image config to use the FullyQualifiedImageName as param to set

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,10 +17,9 @@ limitations under the License.
 package v1alpha2
 
 import (
-	"encoding/json"
-
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
 	next "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1alpha3"
+	pkgutil "github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 	"github.com/pkg/errors"
 )
 
@@ -31,10 +30,10 @@ import (
 // 3. Updates
 //  - KanikoBuildContext instead of GCSBucket
 //  - HelmRelease.valuesFilePath -> valuesFiles in yaml
-func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
+func (config *SkaffoldConfig) Upgrade() (util.VersionedConfig, error) {
 	// convert Deploy (should be the same)
 	var newDeploy next.DeployConfig
-	if err := convert(config.Deploy, &newDeploy); err != nil {
+	if err := pkgutil.CloneThroughJSON(config.Deploy, &newDeploy); err != nil {
 		return nil, errors.Wrap(err, "converting deploy config")
 	}
 	// if the helm deploy config was set, then convert ValueFilePath to ValuesFiles
@@ -49,7 +48,7 @@ func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
 	// convert Profiles (should be the same)
 	var newProfiles []next.Profile
 	if config.Profiles != nil {
-		if err := convert(config.Profiles, &newProfiles); err != nil {
+		if err := pkgutil.CloneThroughJSON(config.Profiles, &newProfiles); err != nil {
 			return nil, errors.Wrap(err, "converting new profile")
 		}
 	}
@@ -71,7 +70,7 @@ func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
 
 	// copy over old build config to new build config
 	var newBuild next.BuildConfig
-	if err := convert(config.Build, &newBuild); err != nil {
+	if err := pkgutil.CloneThroughJSON(config.Build, &newBuild); err != nil {
 		return nil, errors.Wrap(err, "converting new build")
 	}
 	// if the kaniko build was set, then convert it
@@ -87,22 +86,11 @@ func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
 		}
 	}
 
-	return &next.SkaffoldPipeline{
+	return &next.SkaffoldConfig{
 		APIVersion: next.Version,
 		Kind:       config.Kind,
 		Deploy:     newDeploy,
 		Build:      newBuild,
 		Profiles:   newProfiles,
 	}, nil
-}
-
-func convert(old interface{}, new interface{}) error {
-	o, err := json.Marshal(old)
-	if err != nil {
-		return errors.Wrap(err, "marshalling old")
-	}
-	if err := json.Unmarshal(o, &new); err != nil {
-		return errors.Wrap(err, "unmarshalling new")
-	}
-	return nil
 }

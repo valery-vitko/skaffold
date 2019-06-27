@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,62 +20,69 @@ import (
 	"context"
 	"io"
 	"io/ioutil"
+	"time"
 
 	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/flags"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
 	quietFlag       bool
-	buildFormatFlag = flags.NewTemplateFlag("{{range .Builds}}{{.ImageName}} -> {{.Tag}}\n{{end}}", BuildOutput{})
+	buildFormatFlag = flags.NewTemplateFlag("{{json .}}", flags.BuildOutput{})
 )
 
 // NewCmdBuild describes the CLI command to build artifacts.
 func NewCmdBuild(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "build",
-		Short: "Builds the artifacts",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBuild(out)
-		},
-	}
-	AddRunDevFlags(cmd)
-	cmd.Flags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress the build output and print image built on success")
-	cmd.Flags().VarP(buildFormatFlag, "output", "o", buildFormatFlag.Usage())
-	return cmd
+	return NewCmd(out, "build").
+		WithDescription("Builds the artifacts").
+		WithCommonFlags().
+		WithFlags(func(f *pflag.FlagSet) {
+			f.StringSliceVarP(&opts.TargetImages, "build-image", "b", nil, "Choose which artifacts to build. Artifacts with image names that contain the expression will be built only. Default is to build sources for all artifacts")
+			f.BoolVarP(&quietFlag, "quiet", "q", false, "Suppress the build output and print image built on success. See --output to format output.")
+			f.VarP(buildFormatFlag, "output", "o", "Used in conjunction with --quiet flag. "+buildFormatFlag.Usage())
+		}).
+		NoArgs(cancelWithCtrlC(context.Background(), doBuild))
 }
 
-// BuildOutput is the output of `skaffold build`.
-type BuildOutput struct {
-	Builds []build.Artifact
-}
-
-func runBuild(out io.Writer) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	catchCtrlC(cancel)
-
-	runner, config, err := newRunner(opts)
-	if err != nil {
-		return errors.Wrap(err, "creating runner")
-	}
-
+func doBuild(ctx context.Context, out io.Writer) error {
 	buildOut := out
 	if quietFlag {
 		buildOut = ioutil.Discard
 	}
 
-	bRes, err := runner.BuildAndTest(ctx, buildOut, config.Build.Artifacts)
-	if err != nil {
+	start := time.Now()
+	defer func() {
+		color.Default.Fprintln(buildOut, "Complete in", time.Since(start))
+	}()
+
+	return withRunner(ctx, func(r runner.Runner, config *latest.SkaffoldConfig) error {
+		bRes, err := r.BuildAndTest(ctx, buildOut, targetArtifacts(opts, config))
+
+		if quietFlag {
+			cmdOut := flags.BuildOutput{Builds: bRes}
+			if err := buildFormatFlag.Template().Execute(out, cmdOut); err != nil {
+				return errors.Wrap(err, "executing template")
+			}
+		}
+
 		return err
+	})
+}
+
+func targetArtifacts(opts *config.SkaffoldOptions, cfg *latest.SkaffoldConfig) []*latest.Artifact {
+	var targetArtifacts []*latest.Artifact
+
+	for _, artifact := range cfg.Build.Artifacts {
+		if opts.IsTargetImage(artifact) {
+			targetArtifacts = append(targetArtifacts, artifact)
+		}
 	}
 
-	cmdOut := BuildOutput{Builds: bRes}
-	if err := buildFormatFlag.Template().Execute(out, cmdOut); err != nil {
-		return errors.Wrap(err, "executing template")
-	}
-	return nil
+	return targetArtifacts
 }

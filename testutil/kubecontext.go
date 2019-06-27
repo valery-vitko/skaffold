@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,25 +17,18 @@ limitations under the License.
 package testutil
 
 import (
-	"testing"
-
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
 )
 
 // SetupFakeKubernetesContext replaces the current kubernetes configuration
 // file to setup a fixed current context.
-func SetupFakeKubernetesContext(t *testing.T, config api.Config) func() {
-	kubeConfig, cleanup := TempFile(t, "config", []byte{})
+func (t *T) SetupFakeKubernetesContext(config api.Config) {
+	kubeConfig := t.TempFile("config", []byte{})
 
 	if err := clientcmd.WriteToFile(config, kubeConfig); err != nil {
 		t.Fatalf("writing temp kubeconfig")
 	}
 
-	unsetEnvs := SetEnvs(t, map[string]string{"KUBECONFIG": kubeConfig})
-
-	return func() {
-		cleanup()
-		unsetEnvs(t)
-	}
+	t.SetEnvs(map[string]string{"KUBECONFIG": kubeConfig})
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,13 +27,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// GradleCommand stores Gradle executable and wrapper name
 var GradleCommand = util.CommandWrapper{Executable: "gradle", Wrapper: "gradlew"}
 
 // GetDependenciesGradle finds the source dependencies for the given jib-gradle artifact.
 // All paths are absolute.
 func GetDependenciesGradle(ctx context.Context, workspace string, a *latest.JibGradleArtifact) ([]string, error) {
 	cmd := getCommandGradle(ctx, workspace, a)
-	deps, err := getDependencies(cmd)
+	deps, err := getDependencies(workspace, cmd, a.Project)
 	if err != nil {
 		return nil, errors.Wrapf(err, "getting jibGradle dependencies")
 	}
@@ -41,11 +42,28 @@ func GetDependenciesGradle(ctx context.Context, workspace string, a *latest.JibG
 	return deps, nil
 }
 
-func getCommandGradle(ctx context.Context, workspace string, a *latest.JibGradleArtifact) *exec.Cmd {
-	args := []string{"_jibSkaffoldFiles", "-q"}
-	if a.Project != "" {
-		// multi-module
-		args[0] = fmt.Sprintf(":%s:%s", a.Project, args[0])
-	}
+func getCommandGradle(ctx context.Context, workspace string, a *latest.JibGradleArtifact) exec.Cmd {
+	args := []string{gradleCommand(a, "_jibSkaffoldFilesV2"), "-q"}
 	return GradleCommand.CreateCommand(ctx, workspace, args)
+}
+
+// GenerateGradleArgs generates the arguments to Gradle for building the project as an image.
+func GenerateGradleArgs(task string, imageName string, a *latest.JibGradleArtifact, skipTests bool) []string {
+	// disable jib's rich progress footer; we could use `--console=plain`
+	// but it also disables colour which can be helpful
+	args := []string{"-Djib.console=plain", gradleCommand(a, task), "--image=" + imageName}
+	if skipTests {
+		args = append(args, "-x", "test")
+	}
+	args = append(args, a.Flags...)
+	return args
+}
+
+func gradleCommand(a *latest.JibGradleArtifact, task string) string {
+	if a.Project == "" {
+		return ":" + task
+	}
+
+	// multi-module
+	return fmt.Sprintf(":%s:%s", a.Project, task)
 }

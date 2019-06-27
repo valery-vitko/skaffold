@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,13 +49,17 @@ func TestExtractProjectID(t *testing.T) {
 			imageName:   "gcr.io",
 			shouldErr:   true,
 		},
+		{
+			description: "invalid reference",
+			imageName:   "",
+			shouldErr:   true,
+		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
+		testutil.Run(t, test.description, func(t *testutil.T) {
 			projectID, err := ExtractProjectID(test.imageName)
 
-			testutil.CheckErrorAndDeepEqual(t, test.shouldErr, err, test.expected, projectID)
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, projectID)
 		})
 	}
 }

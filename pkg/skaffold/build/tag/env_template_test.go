@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,95 +18,116 @@ package tag
 
 import (
 	"testing"
-	"text/template"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/warnings"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
 func TestEnvTemplateTagger_GenerateFullyQualifiedImageName(t *testing.T) {
 	tests := []struct {
-		name      string
-		template  string
-		opts      *Options
-		env       []string
-		want      string
-		shouldErr bool
+		description      string
+		template         string
+		imageName        string
+		env              []string
+		expected         string
+		expectedWarnings []string
 	}{
 		{
-			name:     "empty env",
-			template: "{{.IMAGE_NAME}}:{{.DIGEST}}",
-			opts: &Options{
-				ImageName: "foo",
-				Digest:    "bar",
-			},
-			want: "foo:bar",
+			description: "empty env",
+			template:    "{{.IMAGE_NAME}}",
+			imageName:   "foo",
+			expected:    "foo",
 		},
 		{
-			name:     "env",
-			template: "{{.FOO}}-{{.BAZ}}:latest",
-			env:      []string{"FOO=BAR", "BAZ=BAT"},
-			opts: &Options{
-				ImageName: "foo",
-				Digest:    "bar",
-			},
-			want: "BAR-BAT:latest",
+			description: "env",
+			template:    "{{.FOO}}-{{.BAZ}}:latest",
+			env:         []string{"FOO=BAR", "BAZ=BAT"},
+			imageName:   "foo",
+			expected:    "BAR-BAT:latest",
 		},
 		{
-			name:     "opts precedence",
-			template: "{{.IMAGE_NAME}}-{{.FROM_ENV}}:latest",
-			env:      []string{"FROM_ENV=FOO", "IMAGE_NAME=BAT"},
-			opts: &Options{
-				ImageName: "image_name",
-				Digest:    "bar",
-			},
-			want: "image_name-FOO:latest",
+			description: "opts precedence",
+			template:    "{{.IMAGE_NAME}}-{{.FROM_ENV}}:latest",
+			env:         []string{"FROM_ENV=FOO", "IMAGE_NAME=BAT"},
+			imageName:   "image_name",
+			expected:    "image_name-FOO:latest",
 		},
 		{
-			name:     "digest algo hex",
-			template: "{{.IMAGE_NAME}}:{{.DIGEST_ALGO}}-{{.DIGEST_HEX}}",
-			opts: &Options{
-				ImageName: "foo",
-				Digest:    "sha256:abcd",
-			},
-			want: "foo:sha256-abcd",
+			description:      "ignore @{{.DIGEST}} suffix",
+			template:         "{{.IMAGE_NAME}}:tag@{{.DIGEST}}",
+			imageName:        "foo",
+			expected:         "foo:tag",
+			expectedWarnings: []string{"{{.DIGEST}}, {{.DIGEST_ALGO}} and {{.DIGEST_HEX}} are deprecated, image digest will now automatically be appended to image tags"},
+		},
+		{
+			description:      "ignore @{{.DIGEST_ALGO}}:{{.DIGEST_HEX}} suffix",
+			template:         "{{.IMAGE_NAME}}:tag@{{.DIGEST_ALGO}}:{{.DIGEST_HEX}}",
+			imageName:        "image_name",
+			expected:         "image_name:tag",
+			expectedWarnings: []string{"{{.DIGEST}}, {{.DIGEST_ALGO}} and {{.DIGEST_HEX}} are deprecated, image digest will now automatically be appended to image tags"},
+		},
+		{
+			description:      "digest is deprecated",
+			template:         "{{.IMAGE_NAME}}:{{.DIGEST}}",
+			imageName:        "foo",
+			expected:         "foo:_DEPRECATED_DIGEST_",
+			expectedWarnings: []string{"{{.DIGEST}}, {{.DIGEST_ALGO}} and {{.DIGEST_HEX}} are deprecated, image digest will now automatically be appended to image tags"},
+		},
+		{
+			description:      "digest algo is deprecated",
+			template:         "{{.IMAGE_NAME}}:{{.DIGEST_ALGO}}",
+			imageName:        "foo",
+			expected:         "foo:_DEPRECATED_DIGEST_ALGO_",
+			expectedWarnings: []string{"{{.DIGEST}}, {{.DIGEST_ALGO}} and {{.DIGEST_HEX}} are deprecated, image digest will now automatically be appended to image tags"},
+		},
+		{
+			description:      "digest hex is deprecated",
+			template:         "{{.IMAGE_NAME}}:{{.DIGEST_HEX}}",
+			imageName:        "foo",
+			expected:         "foo:_DEPRECATED_DIGEST_HEX_",
+			expectedWarnings: []string{"{{.DIGEST}}, {{.DIGEST_ALGO}} and {{.DIGEST_HEX}} are deprecated, image digest will now automatically be appended to image tags"},
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			c := &envTemplateTagger{
-				Template: template.Must(template.New("").Parse(test.template)),
-			}
-			util.OSEnviron = func() []string {
-				return test.env
-			}
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			fakeWarner := &warnings.Collect{}
+			t.Override(&warnings.Printf, fakeWarner.Warnf)
+			t.Override(&util.OSEnviron, func() []string { return test.env })
 
-			got, err := c.GenerateFullyQualifiedImageName("", test.opts)
-			testutil.CheckErrorAndDeepEqual(t, test.shouldErr, err, test.want, got)
+			c, err := NewEnvTemplateTagger(test.template)
+			t.CheckNoError(err)
+
+			got, err := c.GenerateFullyQualifiedImageName("", test.imageName)
+
+			t.CheckNoError(err)
+			t.CheckDeepEqual(test.expected, got)
+			t.CheckDeepEqual(test.expectedWarnings, fakeWarner.Warnings)
 		})
 	}
 }
 
 func TestNewEnvTemplateTagger(t *testing.T) {
 	tests := []struct {
-		name      string
-		template  string
-		shouldErr bool
+		description string
+		template    string
+		shouldErr   bool
 	}{
 		{
-			name:     "valid template",
-			template: "{{.FOO}}",
+			description: "valid template",
+			template:    "{{.FOO}}",
 		},
 		{
-			name:      "invalid template",
-			template:  "{{.FOO",
-			shouldErr: true,
+			description: "invalid template",
+			template:    "{{.FOO",
+			shouldErr:   true,
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewEnvTemplateTagger(tt.template)
-			testutil.CheckError(t, tt.shouldErr, err)
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			_, err := NewEnvTemplateTagger(test.template)
+
+			t.CheckError(test.shouldErr, err)
 		})
 	}
 }

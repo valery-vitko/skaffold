@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,22 +17,12 @@ limitations under the License.
 package kubectl
 
 import (
-	"fmt"
-	"sort"
 	"testing"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/warnings"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
-
-type fakeWarner struct {
-	warnings []string
-}
-
-func (l *fakeWarner) Warnf(format string, args ...interface{}) {
-	l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
-	sort.Strings(l.warnings)
-}
 
 func TestReplaceImages(t *testing.T) {
 	manifests := ManifestList{[]byte(`
@@ -96,9 +86,9 @@ spec:
   - image: in valid
 `)}
 
-	defer func(w Warner) { warner = w }(warner)
-	fakeWarner := &fakeWarner{}
-	warner = fakeWarner
+	fakeWarner := &warnings.Collect{}
+	reset := testutil.Override(t, &warnings.Printf, fakeWarner.Warnf)
+	defer reset()
 
 	resultManifest, err := manifests.ReplaceImages(builds, "")
 
@@ -107,7 +97,7 @@ spec:
 		"Couldn't parse image: in valid",
 		"image [skaffold/unused] is not used by the deployment",
 		"image [skaffold/usedwrongfqn] is not used by the deployment",
-	}, fakeWarner.warnings)
+	}, fakeWarner.Warnings)
 }
 
 func TestReplaceEmptyManifest(t *testing.T) {
@@ -125,4 +115,17 @@ func TestReplaceInvalidManifest(t *testing.T) {
 	_, err := manifests.ReplaceImages(nil, "")
 
 	testutil.CheckError(t, true, err)
+}
+
+func TestReplaceNonStringImageField(t *testing.T) {
+	manifests := ManifestList{[]byte(`
+apiVersion: v1
+image:
+- value1
+- value2
+`)}
+
+	output, err := manifests.ReplaceImages(nil, "")
+
+	testutil.CheckErrorAndDeepEqual(t, false, err, manifests.String(), output.String())
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,36 +21,29 @@ import (
 	"io"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // NewCmdDev describes the CLI command to run a pipeline in development mode.
 func NewCmdDev(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "dev",
-		Short: "Runs a pipeline file in development mode",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return dev(out)
-		},
-	}
-	AddRunDevFlags(cmd)
-	cmd.Flags().BoolVar(&opts.TailDev, "tail", true, "Stream logs from deployed objects")
-	cmd.Flags().StringVar(&opts.Trigger, "trigger", "polling", "How are changes detected? (polling or manual)")
-	cmd.Flags().BoolVar(&opts.Cleanup, "cleanup", true, "Delete deployments after dev mode is interrupted")
-	cmd.Flags().StringArrayVarP(&opts.Watch, "watch-image", "w", nil, "Choose which artifacts to watch. Artifacts with image names that contain the expression will be watched only. Default is to watch sources for all artifacts")
-	cmd.Flags().IntVarP(&opts.WatchPollInterval, "watch-poll-interval", "i", 1000, "Interval (in ms) between two checks for file changes")
-	cmd.Flags().BoolVar(&opts.PortForward, "port-forward", true, "Port-forward exposed container ports within pods")
-	cmd.Flags().StringArrayVarP(&opts.CustomLabels, "label", "l", nil, "Add custom labels to deployed objects. Set multiple times for multiple labels")
-	return cmd
+	cmdUse := "dev"
+	return NewCmd(out, cmdUse).
+		WithDescription("Runs a pipeline file in development mode").
+		WithCommonFlags().
+		WithFlags(func(f *pflag.FlagSet) {
+			f.StringVar(&opts.Trigger, "trigger", "polling", "How are changes detected? (polling, manual or notify)")
+			f.StringSliceVarP(&opts.TargetImages, "watch-image", "w", nil, "Choose which artifacts to watch. Artifacts with image names that contain the expression will be watched only. Default is to watch sources for all artifacts")
+			f.IntVarP(&opts.WatchPollInterval, "watch-poll-interval", "i", 1000, "Interval (in ms) between two checks for file changes")
+		}).
+		NoArgs(cancelWithCtrlC(context.Background(), doDev))
 }
 
-func dev(out io.Writer) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	catchCtrlC(cancel)
+func doDev(ctx context.Context, out io.Writer) error {
+	opts.EnableRPC = true
 
 	cleanup := func() {}
 	if opts.Cleanup {
@@ -59,28 +52,45 @@ func dev(out io.Writer) error {
 		}()
 	}
 
+	prune := func() {}
+	if opts.Prune() {
+		defer func() {
+			prune()
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			r, config, err := newRunner(opts)
-			if err != nil {
-				return errors.Wrap(err, "creating runner")
-			}
+			err := withRunner(ctx, func(r runner.Runner, config *latest.SkaffoldConfig) error {
+				err := r.Dev(ctx, out, config.Build.Artifacts)
 
-			err = r.Dev(ctx, out, config.Build.Artifacts)
-			if r.HasDeployed() {
-				cleanup = func() {
-					if err := r.Cleanup(context.Background(), out); err != nil {
-						logrus.Warnln("cleanup:", err)
+				if r.HasDeployed() {
+					cleanup = func() {
+						if err := r.Cleanup(context.Background(), out); err != nil {
+							logrus.Warnln("deployer cleanup:", err)
+						}
 					}
 				}
-			}
+
+				if r.HasBuilt() {
+					prune = func() {
+						if err := r.Prune(context.Background(), out); err != nil {
+							logrus.Warnln("builder cleanup:", err)
+						}
+					}
+				}
+
+				return err
+			})
 			if err != nil {
 				if errors.Cause(err) != runner.ErrorConfigurationChanged {
 					return err
 				}
+				// Otherwise, the skaffold config has changed.
+				// just recreate a new runner and restart a dev loop
 			}
 		}
 	}

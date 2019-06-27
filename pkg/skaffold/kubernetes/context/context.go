@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,11 @@ var (
 	currentConfigErr  error
 )
 
+// ResetCurrentConfig is used by tests
+func ResetCurrentConfig() {
+	currentConfigOnce = sync.Once{}
+}
+
 func CurrentConfig() (clientcmdapi.Config, error) {
 	currentConfigOnce.Do(func() {
 		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -42,12 +47,4 @@ func CurrentConfig() (clientcmdapi.Config, error) {
 		currentConfig = cfg
 	})
 	return currentConfig, currentConfigErr
-}
-
-func CurrentContext() (string, error) {
-	cfg, err := CurrentConfig()
-	if err != nil {
-		return "", err
-	}
-	return cfg.CurrentContext, nil
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,21 +19,13 @@ package v1alpha5
 import (
 	"testing"
 
-	next "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1beta1"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 	yaml "gopkg.in/yaml.v2"
 )
 
-func TestPipelineUpgrade(t *testing.T) {
-	tests := []struct {
-		name      string
-		yaml      string
-		expected  *next.SkaffoldPipeline
-		shouldErr bool
-	}{
-		{
-			name: "skaffold yaml with build.acr is not upgradable",
-			yaml: `apiVersion: skaffold/v1alpha5
+func TestUpgrade_removeACR(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha5
 kind: Config
 build:
   artifacts:
@@ -43,12 +35,12 @@ deploy:
   kubectl:
     manifests:
       - k8s-*
-`,
-			shouldErr: true,
-		},
-		{
-			name: "skaffold yaml with profile.build.acr is not upgradable",
-			yaml: `apiVersion: skaffold/v1alpha5
+`
+	upgradeShouldFailt(t, yaml)
+}
+
+func TestUpgrade_removeACRInProfiles(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha5
 kind: Config
 build:
   artifacts:
@@ -61,12 +53,12 @@ profiles:
  - name: test profile
    build: 
     acr: {}
-`,
-			shouldErr: true,
-		},
-		{
-			name: "normal skaffold yaml",
-			yaml: `apiVersion: skaffold/v1alpha5
+`
+	upgradeShouldFailt(t, yaml)
+}
+
+func TestUpgrade(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha5
 kind: Config
 build:
   artifacts:
@@ -92,82 +84,56 @@ profiles:
       kubectl:
         manifests:
         - k8s-*
-`,
-			expected: &next.SkaffoldPipeline{
-				APIVersion: next.Version,
-				Kind:       "Config",
-				Build: next.BuildConfig{
-					TagPolicy: next.TagPolicy{},
-					Artifacts: []*next.Artifact{
-						{
-							ImageName:    "gcr.io/k8s-skaffold/skaffold-example",
-							ArtifactType: next.ArtifactType{},
-						},
-					},
-				},
-				Test: []*next.TestCase{
-					{
-						ImageName:      "gcr.io/k8s-skaffold/skaffold-example",
-						StructureTests: []string{"./test/*"},
-					},
-				},
-				Deploy: next.DeployConfig{
-					DeployType: next.DeployType{
-						KubectlDeploy: &next.KubectlDeploy{
-							Manifests: []string{
-								"k8s-*",
-							},
-						},
-					},
-				},
-				Profiles: []next.Profile{
-					{
-						Name: "test profile",
-						Build: next.BuildConfig{
-							TagPolicy: next.TagPolicy{},
-							Artifacts: []*next.Artifact{
-								{
-									ImageName:    "gcr.io/k8s-skaffold/skaffold-example",
-									ArtifactType: next.ArtifactType{},
-								},
-							},
-						},
-						Test: []*next.TestCase{
-							{
-								ImageName:      "gcr.io/k8s-skaffold/skaffold-example",
-								StructureTests: []string{"./test/*"},
-							},
-						},
-						Deploy: next.DeployConfig{
-							DeployType: next.DeployType{
-								KubectlDeploy: &next.KubectlDeploy{
-									Manifests: []string{
-										"k8s-*",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
+`
+	expected := `apiVersion: skaffold/v1beta1
+kind: Config
+build:
+  artifacts:
+  - image: gcr.io/k8s-skaffold/skaffold-example
+test:
+  - image: gcr.io/k8s-skaffold/skaffold-example
+    structureTests:
+     - ./test/*
+deploy:
+  kubectl:
+    manifests:
+    - k8s-*
+profiles:
+  - name: test profile
+    build:
+      artifacts:
+      - image: gcr.io/k8s-skaffold/skaffold-example
+    test:
+     - image: gcr.io/k8s-skaffold/skaffold-example
+       structureTests:
+         - ./test/*
+    deploy:
+      kubectl:
+        manifests:
+        - k8s-*
+`
+	verifyUpgrade(t, yaml, expected)
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pipeline := NewSkaffoldPipeline()
-			err := yaml.UnmarshalStrict([]byte(tt.yaml), pipeline)
-			if err != nil {
-				t.Fatalf("unexpected error during parsing old config: %v", err)
-			}
+func upgradeShouldFailt(t *testing.T, input string) {
+	config := NewSkaffoldConfig()
+	err := yaml.UnmarshalStrict([]byte(input), config)
+	testutil.CheckErrorAndDeepEqual(t, false, err, Version, config.GetVersion())
 
-			upgraded, err := pipeline.Upgrade()
+	_, err = config.Upgrade()
+	testutil.CheckError(t, true, err)
+}
 
-			if tt.shouldErr {
-				testutil.CheckErrorAndDeepEqual(t, tt.shouldErr, err, nil, upgraded)
-			} else {
-				testutil.CheckErrorAndDeepEqual(t, tt.shouldErr, err, tt.expected, upgraded)
-			}
-		})
-	}
+func verifyUpgrade(t *testing.T, input, output string) {
+	config := NewSkaffoldConfig()
+	err := yaml.UnmarshalStrict([]byte(input), config)
+	testutil.CheckErrorAndDeepEqual(t, false, err, Version, config.GetVersion())
+
+	upgraded, err := config.Upgrade()
+	testutil.CheckError(t, false, err)
+
+	expected := v1beta1.NewSkaffoldConfig()
+	err = yaml.UnmarshalStrict([]byte(output), expected)
+
+	testutil.CheckErrorAndDeepEqual(t, false, err, expected, upgraded)
 }

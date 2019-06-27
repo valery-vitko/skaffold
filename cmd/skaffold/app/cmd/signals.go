@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,10 +18,21 @@ package cmd
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
 )
+
+func cancelWithCtrlC(ctx context.Context, action func(context.Context, io.Writer) error) func(io.Writer) error {
+	return func(out io.Writer) error {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		catchCtrlC(cancel)
+		return action(ctx, out)
+	}
+}
 
 func catchCtrlC(cancel context.CancelFunc) {
 	signals := make(chan os.Signal, 1)
@@ -33,6 +44,7 @@ func catchCtrlC(cancel context.CancelFunc) {
 
 	go func() {
 		<-signals
+		signal.Stop(signals)
 		cancel()
 	}()
 }

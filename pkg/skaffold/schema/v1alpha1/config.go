@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,14 +22,14 @@ import (
 
 const Version string = "skaffold/v1alpha1"
 
-// NewSkaffoldPipeline creates a SkaffoldPipeline
-func NewSkaffoldPipeline() util.VersionedConfig {
-	return new(SkaffoldPipeline)
+// NewSkaffoldConfig creates a SkaffoldConfig
+func NewSkaffoldConfig() util.VersionedConfig {
+	return new(SkaffoldConfig)
 }
 
-// SkaffoldPipeline is the top level config object
+// SkaffoldConfig is the top level config object
 // that is parsed from a skaffold.yaml
-type SkaffoldPipeline struct {
+type SkaffoldConfig struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 
@@ -37,7 +37,7 @@ type SkaffoldPipeline struct {
 	Deploy DeployConfig `yaml:"deploy"`
 }
 
-func (config *SkaffoldPipeline) GetVersion() string {
+func (config *SkaffoldConfig) GetVersion() string {
 	return config.APIVersion
 }
 
@@ -51,8 +51,8 @@ type BuildConfig struct {
 // BuildType contains the specific implementation and parameters needed
 // for the build step. Only one field should be populated.
 type BuildType struct {
-	LocalBuild       *LocalBuild       `yaml:"local,omitempty"`
-	GoogleCloudBuild *GoogleCloudBuild `yaml:"googleCloudBuild,omitempty"`
+	LocalBuild       *LocalBuild       `yaml:"local,omitempty" yamltags:"oneOf=build"`
+	GoogleCloudBuild *GoogleCloudBuild `yaml:"googleCloudBuild,omitempty" yamltags:"oneOf=build"`
 }
 
 // LocalBuild contains the fields needed to do a build on the local docker daemon
@@ -74,8 +74,8 @@ type DeployConfig struct {
 // DeployType contains the specific implementation and parameters needed
 // for the deploy step. Only one field should be populated.
 type DeployType struct {
-	HelmDeploy    *HelmDeploy    `yaml:"helm,omitempty"`
-	KubectlDeploy *KubectlDeploy `yaml:"kubectl,omitempty"`
+	HelmDeploy    *HelmDeploy    `yaml:"helm,omitempty" yamltags:"oneOf=deploy"`
+	KubectlDeploy *KubectlDeploy `yaml:"kubectl,omitempty" yamltags:"oneOf=deploy"`
 }
 
 // KubectlDeploy contains the configuration needed for deploying with `kubectl apply`

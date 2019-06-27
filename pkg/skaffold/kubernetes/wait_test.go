@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,112 +22,114 @@ import (
 	"time"
 
 	"github.com/GoogleContainerTools/skaffold/testutil"
+
+	"k8s.io/apimachinery/pkg/watch"
+
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
+	fakekubeclientset "k8s.io/client-go/kubernetes/fake"
 )
 
-var podReadyState = &v1.Pod{
-	ObjectMeta: metav1.ObjectMeta{
-		Name: "podname",
-	},
-	Status: v1.PodStatus{
-		Phase: v1.PodRunning,
-	},
-	Spec: v1.PodSpec{
-		Containers: []v1.Container{
-			{
-				Name:  "container_name",
-				Image: "image_name",
-			},
-		},
-	},
-}
-
-var podUnitialized = &v1.Pod{
-	ObjectMeta: metav1.ObjectMeta{
-		Name: "podname",
-	},
-	Status: v1.PodStatus{
-		Conditions: []v1.PodCondition{
-			{
-				Type: v1.PodScheduled,
-			},
-		},
-		Phase: v1.PodPending,
-	},
-}
-
-var podBadPhase = &v1.Pod{
-	ObjectMeta: metav1.ObjectMeta{
-		Name: "podname",
-	},
-	Status: v1.PodStatus{
-		Conditions: []v1.PodCondition{
-			{
-				Type: v1.PodScheduled,
-			},
-		},
-		Phase: "not a real phase",
-	},
-	Spec: v1.PodSpec{
-		Containers: []v1.Container{
-			{
-				Name:  "container_name",
-				Image: "image_name",
-			},
-		},
-	},
-}
-
-func TestWaitForPodReady(t *testing.T) {
-	var tests = []struct {
+func TestWaitForPodSucceeded(t *testing.T) {
+	tests := []struct {
 		description string
-		initialObj  *v1.Pod
 		phases      []v1.PodPhase
-		timeout     time.Duration
-
-		shouldErr bool
+		shouldErr   bool
 	}{
 		{
-			description: "pod already ready",
-			initialObj:  podReadyState,
-		},
-		{
-			description: "pod uninitialized to succeed without running",
-			initialObj:  podUnitialized,
-			phases:      []v1.PodPhase{v1.PodUnknown, v1.PodSucceeded},
+			description: "pod eventually succeeds",
+			phases:      []v1.PodPhase{v1.PodRunning, v1.PodSucceeded},
+		}, {
+			description: "pod eventually fails",
+			phases:      []v1.PodPhase{v1.PodRunning, v1.PodFailed},
 			shouldErr:   true,
-		},
-		{
-			description: "pod bad phase",
-			initialObj:  podBadPhase,
+		}, {
+			description: "pod times out",
+			phases:      []v1.PodPhase{v1.PodRunning, v1.PodRunning, v1.PodRunning, v1.PodRunning, v1.PodRunning, v1.PodRunning},
 			shouldErr:   true,
 		},
 	}
+
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			client := fake.NewSimpleClientset(test.initialObj)
-			pods := client.CoreV1().Pods("")
-			errCh := make(chan error, 1)
-			done := make(chan struct{}, 1)
+			pod := &v1.Pod{}
+			client := fakekubeclientset.NewSimpleClientset(pod)
+
+			fakeWatcher := watch.NewRaceFreeFake()
+			client.PrependWatchReactor("*", testutil.SetupFakeWatcher(fakeWatcher))
+			fakePods := client.CoreV1().Pods("")
+
+			errChan := make(chan error)
 			go func() {
-				errCh <- WaitForPodReady(context.Background(), pods, "podname")
-				done <- struct{}{}
+				errChan <- WaitForPodSucceeded(context.TODO(), fakePods, "", 5*time.Second)
 			}()
-			for _, p := range test.phases {
-				time.Sleep(501 * time.Millisecond)
-				test.initialObj.Status.Phase = p
-				pods.UpdateStatus(test.initialObj)
+
+			for _, phase := range test.phases {
+				if fakeWatcher.IsStopped() {
+					break
+				}
+				fakeWatcher.Modify(&v1.Pod{
+					Status: v1.PodStatus{
+						Phase: phase,
+					},
+				})
+				time.Sleep(time.Second)
 			}
-			<-done
-			var err error
-			select {
-			case waitErr := <-errCh:
-				err = waitErr
-			default:
-			}
+			err := <-errChan
 			testutil.CheckError(t, test.shouldErr, err)
+		})
+	}
+
+}
+
+func TestIsPodSucceeded(t *testing.T) {
+
+	tests := []struct {
+		description string
+		podName     string
+		phase       v1.PodPhase
+		shouldErr   bool
+		expected    bool
+	}{
+		{
+			description: "pod name doesn't match",
+			podName:     "another-pod",
+		}, {
+			description: "pod phase is PodSucceeded",
+			phase:       v1.PodSucceeded,
+			expected:    true,
+		}, {
+			description: "pod phase is PodRunning",
+			phase:       v1.PodRunning,
+		}, {
+			description: "pod phase is PodFailed",
+			phase:       v1.PodFailed,
+			shouldErr:   true,
+		}, {
+			description: "pod phase is PodUnknown",
+			phase:       v1.PodUnknown,
+		}, {
+			description: "pod phase is PodPending",
+			phase:       v1.PodPending,
+		}, {
+			description: "unknown pod phase",
+			phase:       "unknownPhase",
+			shouldErr:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			pod := &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: test.phase,
+				},
+			}
+			dummyEvent := &watch.Event{
+				Type:   "dummyEvent",
+				Object: pod,
+			}
+			actual, err := isPodSucceeded(test.podName)(dummyEvent)
+			testutil.CheckErrorAndDeepEqual(t, test.shouldErr, err, actual, test.expected)
 		})
 	}
 }

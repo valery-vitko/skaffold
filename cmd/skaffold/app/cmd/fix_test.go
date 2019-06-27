@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -108,16 +108,14 @@ kind: Config
 			shouldErr:   true,
 		},
 	}
-
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			cfgFile, teardown := testutil.TempFile(t, "config", []byte(test.inputYaml))
-			defer teardown()
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			cfgFile := t.TempFile("config", []byte(test.inputYaml))
 
 			var b bytes.Buffer
-			err := runFix(&b, cfgFile, false)
+			err := fix(&b, cfgFile, false)
 
-			testutil.CheckErrorAndDeepEqual(t, test.shouldErr, err, test.output, b.String())
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.output, b.String())
 		})
 	}
 }
@@ -160,7 +158,7 @@ deploy:
 	defer teardown()
 
 	var b bytes.Buffer
-	err := runFix(&b, cfgFile, true)
+	err := fix(&b, cfgFile, true)
 
 	output, _ := ioutil.ReadFile(cfgFile)
 

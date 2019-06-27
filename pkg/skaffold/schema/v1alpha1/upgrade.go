@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
 	next "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1alpha2"
 	"github.com/sirupsen/logrus"
@@ -39,13 +38,13 @@ import (
 // 3. Updates
 //  - TagPolicy is a struct
 //
-func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
+func (config *SkaffoldConfig) Upgrade() (util.VersionedConfig, error) {
 	var tagPolicy next.TagPolicy
-	if config.Build.TagPolicy == constants.TagStrategySha256 {
+	if config.Build.TagPolicy == "sha256" {
 		tagPolicy = next.TagPolicy{
 			ShaTagger: &next.ShaTagger{},
 		}
-	} else if config.Build.TagPolicy == constants.TagStrategyGitCommit {
+	} else if config.Build.TagPolicy == "gitCommit" {
 		tagPolicy = next.TagPolicy{
 			GitTagger: &next.GitTagger{},
 		}
@@ -82,16 +81,21 @@ func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
 
 	var newArtifacts []*next.Artifact
 	for _, artifact := range config.Build.Artifacts {
-		newArtifacts = append(newArtifacts, &next.Artifact{
+		newArtifact := &next.Artifact{
 			ImageName: artifact.ImageName,
 			Workspace: artifact.Workspace,
-			ArtifactType: next.ArtifactType{
+		}
+
+		if artifact.DockerfilePath != "" || len(artifact.BuildArgs) > 0 {
+			newArtifact.ArtifactType = next.ArtifactType{
 				DockerArtifact: &next.DockerArtifact{
 					DockerfilePath: artifact.DockerfilePath,
 					BuildArgs:      artifact.BuildArgs,
 				},
-			},
-		})
+			}
+		}
+
+		newArtifacts = append(newArtifacts, newArtifact)
 	}
 
 	var newBuildType = next.BuildType{}
@@ -106,7 +110,7 @@ func (config *SkaffoldPipeline) Upgrade() (util.VersionedConfig, error) {
 		}
 	}
 
-	return &next.SkaffoldPipeline{
+	return &next.SkaffoldConfig{
 		APIVersion: next.Version,
 		Kind:       config.Kind,
 		Deploy: next.DeployConfig{

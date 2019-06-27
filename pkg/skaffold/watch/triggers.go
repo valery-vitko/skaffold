@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,35 +18,47 @@ package watch
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
+	runcontext "github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/context"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/server"
+	"github.com/rjeczalik/notify"
 	"github.com/sirupsen/logrus"
 )
 
 // Trigger describes a mechanism that triggers the watch.
 type Trigger interface {
-	Start() (<-chan bool, func())
+	Start(context.Context) (<-chan bool, error)
 	WatchForChanges(io.Writer)
 	Debounce() bool
 }
 
 // NewTrigger creates a new trigger.
-func NewTrigger(opts *config.SkaffoldOptions) (Trigger, error) {
-	switch strings.ToLower(opts.Trigger) {
+func NewTrigger(runctx *runcontext.RunContext) (Trigger, error) {
+	switch strings.ToLower(runctx.Opts.Trigger) {
 	case "polling":
 		return &pollTrigger{
-			Interval: time.Duration(opts.WatchPollInterval) * time.Millisecond,
+			Interval: time.Duration(runctx.Opts.WatchPollInterval) * time.Millisecond,
+		}, nil
+	case "notify":
+		return &fsNotifyTrigger{
+			Interval: time.Duration(runctx.Opts.WatchPollInterval) * time.Millisecond,
 		}, nil
 	case "manual":
 		return &manualTrigger{}, nil
+	case "api":
+		return &apiTrigger{
+			Trigger: server.Trigger,
+		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported type of trigger: %s", opts.Trigger)
+		return nil, fmt.Errorf("unsupported trigger: %s", runctx.Opts.Trigger)
 	}
 }
 
@@ -65,23 +77,27 @@ func (t *pollTrigger) WatchForChanges(out io.Writer) {
 }
 
 // Start starts a timer.
-func (t *pollTrigger) Start() (<-chan bool, func()) {
+func (t *pollTrigger) Start(ctx context.Context) (<-chan bool, error) {
 	trigger := make(chan bool)
 
 	ticker := time.NewTicker(t.Interval)
 	go func() {
 		for {
-			<-ticker.C
-			trigger <- true
+			select {
+			case <-ticker.C:
+				trigger <- true
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			}
 		}
 	}()
 
-	return trigger, ticker.Stop
+	return trigger, nil
 }
 
 // manualTrigger watches for changes when the user presses a key.
-type manualTrigger struct {
-}
+type manualTrigger struct{}
 
 // Debounce tells the watcher to not debounce rapid sequence of changes.
 func (t *manualTrigger) Debounce() bool {
@@ -93,8 +109,14 @@ func (t *manualTrigger) WatchForChanges(out io.Writer) {
 }
 
 // Start starts listening to pressed keys.
-func (t *manualTrigger) Start() (<-chan bool, func()) {
+func (t *manualTrigger) Start(ctx context.Context) (<-chan bool, error) {
 	trigger := make(chan bool)
+
+	var stopped int32
+	go func() {
+		<-ctx.Done()
+		atomic.StoreInt32(&stopped, 1)
+	}()
 
 	reader := bufio.NewReader(os.Stdin)
 	go func() {
@@ -103,9 +125,98 @@ func (t *manualTrigger) Start() (<-chan bool, func()) {
 			if err != nil {
 				logrus.Debugf("manual trigger error: %s", err)
 			}
+
+			// Wait until the context is cancelled.
+			if atomic.LoadInt32(&stopped) == 1 {
+				return
+			}
 			trigger <- true
 		}
 	}()
 
-	return trigger, func() {}
+	return trigger, nil
+}
+
+// notifyTrigger watches for changes with fsnotify
+type fsNotifyTrigger struct {
+	Interval time.Duration
+}
+
+// Debounce tells the watcher to not debounce rapid sequence of changes.
+func (t *fsNotifyTrigger) Debounce() bool {
+	// This trigger has built-in debouncing.
+	return false
+}
+
+func (t *fsNotifyTrigger) WatchForChanges(out io.Writer) {
+	color.Yellow.Fprintln(out, "Watching for changes...")
+}
+
+// Start listening for file system changes
+func (t *fsNotifyTrigger) Start(ctx context.Context) (<-chan bool, error) {
+	c := make(chan notify.EventInfo, 100)
+
+	// Watch current directory recursively
+	if err := notify.Watch("./...", c, notify.All); err != nil {
+		return nil, err
+	}
+
+	// Since the file watcher runs in a separate go routine
+	// and can take some time to start, it can lose the very first change.
+	// As a mitigation, we act as if a change was detected.
+	go func() { c <- nil }()
+
+	trigger := make(chan bool)
+	go func() {
+		timer := time.NewTimer(1<<63 - 1) // Forever
+
+		for {
+			select {
+			case e := <-c:
+				logrus.Debugln("Change detected", e)
+
+				// Wait t.interval before triggering.
+				// This way, rapid stream of events will be grouped.
+				timer.Reset(t.Interval)
+			case <-timer.C:
+				trigger <- true
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
+	}()
+
+	return trigger, nil
+}
+
+type apiTrigger struct {
+	Trigger chan bool
+}
+
+// Start receives triggers from gRPC/HTTP and triggers a rebuild.
+func (t *apiTrigger) Start(ctx context.Context) (<-chan bool, error) {
+	trigger := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-t.Trigger:
+				logrus.Debugln("build request received")
+				trigger <- true
+			case <-ctx.Done():
+				break
+			}
+		}
+	}()
+
+	return trigger, nil
+}
+
+func (t *apiTrigger) Debounce() bool {
+	return false
+}
+
+func (t *apiTrigger) WatchForChanges(out io.Writer) {
+	color.Yellow.Fprintln(out, "Watching on designated port for build requests...")
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,27 +18,46 @@ package config
 
 import (
 	"strings"
+
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 )
+
+// PortForwardOptions are options set by the command line for port forwarding
+// with additional configuration information as well
+type PortForwardOptions struct {
+	Enabled     bool
+	ForwardPods bool
+}
 
 // SkaffoldOptions are options that are set by command line arguments not included
 // in the config file itself
 type SkaffoldOptions struct {
-	ConfigurationFile string
-	Cleanup           bool
-	Notification      bool
-	Tail              bool
-	TailDev           bool
-	PortForward       bool
-	SkipTests         bool
-	Profiles          []string
-	CustomTag         string
-	Namespace         string
-	Watch             []string
-	Trigger           string
-	CustomLabels      []string
-	WatchPollInterval int
-	DefaultRepo       string
-	PreBuiltImages    []string
+	ConfigurationFile  string
+	Cleanup            bool
+	Notification       bool
+	Tail               bool
+	TailDev            bool
+	SkipTests          bool
+	CacheArtifacts     bool
+	EnableRPC          bool
+	Force              bool
+	ForceDev           bool
+	NoPrune            bool
+	NoPruneChildren    bool
+	PortForward        PortForwardOptions
+	CustomTag          string
+	Namespace          string
+	CacheFile          string
+	Trigger            string
+	WatchPollInterval  int
+	DefaultRepo        string
+	CustomLabels       []string
+	TargetImages       []string
+	Profiles           []string
+	InsecureRegistries []string
+	Command            string
+	RPCPort            int
+	RPCHTTPPort        int
 }
 
 // Labels returns a map of labels to be applied to all deployed
@@ -47,16 +66,16 @@ func (opts *SkaffoldOptions) Labels() map[string]string {
 	labels := map[string]string{}
 
 	if opts.Cleanup {
-		labels["cleanup"] = "true"
+		labels["skaffold.dev/cleanup"] = "true"
 	}
 	if opts.Tail || opts.TailDev {
-		labels["tail"] = "true"
+		labels["skaffold.dev/tail"] = "true"
 	}
 	if opts.Namespace != "" {
-		labels["namespace"] = opts.Namespace
+		labels["skaffold.dev/namespace"] = opts.Namespace
 	}
 	if len(opts.Profiles) > 0 {
-		labels["profiles"] = strings.Join(opts.Profiles, "__")
+		labels["skaffold.dev/profiles"] = strings.Join(opts.Profiles, "__")
 	}
 	for _, cl := range opts.CustomLabels {
 		l := strings.SplitN(cl, "=", 2)
@@ -67,4 +86,28 @@ func (opts *SkaffoldOptions) Labels() map[string]string {
 		labels[l[0]] = l[1]
 	}
 	return labels
+}
+
+// Prune returns true iff the user did NOT specify the --no-prune flag,
+// and the user did NOT specify the --cache-artifacts flag.
+func (opts *SkaffoldOptions) Prune() bool {
+	return !opts.NoPrune && !opts.CacheArtifacts
+}
+
+func (opts *SkaffoldOptions) ForceDeploy() bool {
+	return opts.ForceDev || opts.Force
+}
+
+func (opts *SkaffoldOptions) IsTargetImage(artifact *latest.Artifact) bool {
+	if len(opts.TargetImages) == 0 {
+		return true
+	}
+
+	for _, targetImage := range opts.TargetImages {
+		if strings.Contains(artifact.ImageName, targetImage) {
+			return true
+		}
+	}
+
+	return false
 }

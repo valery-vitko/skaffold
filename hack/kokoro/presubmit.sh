@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2018 The Skaffold Authors
+# Copyright 2019 The Skaffold Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,6 @@ export DOCKER_NAMESPACE=gcr.io/k8s-skaffold
 source $KOKORO_GFILE_DIR/common.sh
 
 pushd $KOKORO_ARTIFACTS_DIR/github/skaffold >/dev/null
-    make integration-in-docker
+    GCP_ONLY=true make integration-in-docker
 popd
 

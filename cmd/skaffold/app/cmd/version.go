@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,28 +21,21 @@ import (
 
 	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/flags"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/version"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var versionFlag = flags.NewTemplateFlag("{{.Version}}\n", version.Info{})
 
 func NewCmdVersion(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "version",
-		Short: "Print the version information",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunVersion(out, cmd)
-		},
-	}
-
-	cmd.Flags().VarP(versionFlag, "output", "o", versionFlag.Usage())
-	return cmd
+	return NewCmd(out, "version").
+		WithDescription("Print the version information").
+		WithFlags(func(f *pflag.FlagSet) {
+			f.VarP(versionFlag, "output", "o", versionFlag.Usage())
+		}).
+		NoArgs(doVersion)
 }
 
-func RunVersion(out io.Writer, cmd *cobra.Command) error {
-	if err := versionFlag.Template().Execute(out, version.Get()); err != nil {
-		return errors.Wrap(err, "executing template")
-	}
-	return nil
+func doVersion(out io.Writer) error {
+	return versionFlag.Template().Execute(out, version.Get())
 }

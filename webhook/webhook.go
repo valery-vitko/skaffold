@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,17 +18,20 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 
+	"github.com/GoogleContainerTools/skaffold/pkg/webhook/gcs"
+
+	"github.com/GoogleContainerTools/skaffold/pkg/webhook/constants"
+	pkggithub "github.com/GoogleContainerTools/skaffold/pkg/webhook/github"
 	"github.com/GoogleContainerTools/skaffold/pkg/webhook/kubernetes"
 	"github.com/GoogleContainerTools/skaffold/pkg/webhook/labels"
 	"github.com/google/go-github/github"
 	"github.com/pkg/errors"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/webhook/constants"
-	pkggithub "github.com/GoogleContainerTools/skaffold/pkg/webhook/github"
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 const (
@@ -36,9 +39,9 @@ const (
 )
 
 func main() {
-	//Setup the serve route to receive guthub events
+	//Setup the serve route to receive github events
 	http.HandleFunc("/receive", handleGithubEvent)
-
+	flag.Parse()
 	// Start the server
 	log.Println("Listening...")
 	log.Fatal(http.ListenAndServe(port, nil))
@@ -54,11 +57,13 @@ func handleGithubEvent(w http.ResponseWriter, r *http.Request) {
 		log.Printf("error decoding pr event: %v", err)
 	}
 	if err := handlePullRequestEvent(event); err != nil {
+		commentOnGithub(event, "Error creating deployment, please see controller logs for details.")
 		log.Printf("error handling pr event: %v", err)
 	}
 }
 
 func handlePullRequestEvent(event *github.PullRequestEvent) error {
+	log.Printf("handling pull request event: %+v", event)
 	// Cleanup any deployments if PR was merged or closed
 	if event.GetAction() == constants.ClosedAction {
 		return kubernetes.CleanupDeployment(event)
@@ -104,20 +109,45 @@ func handlePullRequestEvent(event *github.PullRequestEvent) error {
 	if err != nil {
 		return errors.Wrapf(err, "creating deployment for PR %d", prNumber)
 	}
-	if err := kubernetes.WaitForDeploymentToStabilize(deployment); err != nil {
-		return errors.Wrapf(err, "waiting for deployment %s to stabilize", deployment.Name)
+	response := succeeded
+	if err := kubernetes.WaitForDeploymentToStabilize(deployment, ip); err != nil {
+		log.Printf("Deployment didn't stabilize, commenting with failure message...")
+		response = failed
 	}
 
-	// Comment on the PR and remove the docs-modifications label
-	githubClient := pkggithub.NewClient()
+	msg, err := response(deployment, event, ip)
+	if err != nil {
+		return errors.Wrapf(err, "getting github message")
+	}
+
+	if err := commentOnGithub(event, msg); err != nil {
+		return errors.Wrap(err, "commenting on github")
+	}
+
+	return nil
+}
+
+func succeeded(d *appsv1.Deployment, event *github.PullRequestEvent, ip string) (string, error) {
 	baseURL := kubernetes.BaseURL(ip)
-	msg := fmt.Sprintf("Please visit [%s](%s) to view changes to the docs.", baseURL, baseURL)
+	return fmt.Sprintf("Please visit [%s](%s) to view changes to the docs.", baseURL, baseURL), nil
+}
+
+func failed(d *appsv1.Deployment, event *github.PullRequestEvent, ip string) (string, error) {
+	name, err := gcs.UploadDeploymentLogsToBucket(d, event.GetNumber())
+	if err != nil {
+		return "", errors.Wrapf(err, "uploading logs to bucket")
+	}
+	url := fmt.Sprintf("https://storage.googleapis.com/%s/%s", constants.LogsGCSBucket, name)
+	return fmt.Sprintf("Error creating deployment %s, please visit %s to view logs.", d.Name, url), nil
+}
+
+func commentOnGithub(event *github.PullRequestEvent, msg string) error {
+	githubClient := pkggithub.NewClient()
 	if err := githubClient.CommentOnPR(event, msg); err != nil {
-		return errors.Wrapf(err, "comenting on PR %d", prNumber)
+		return errors.Wrapf(err, "commenting on PR %d", event.GetNumber())
 	}
 	if err := githubClient.RemoveLabelFromPR(event, constants.DocsLabel); err != nil {
-		return errors.Wrapf(err, "removing %s label from PR %d", constants.DocsLabel, prNumber)
+		return errors.Wrapf(err, "removing %s label from PR %d", constants.DocsLabel, event.GetNumber())
 	}
-
 	return nil
 }

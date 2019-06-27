@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2018 The Skaffold Authors
+# Copyright 2019 The Skaffold Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,17 +20,19 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 if ! [ -x "$(command -v golangci-lint)" ]; then
 	echo "Installing GolangCI-Lint"
-	${DIR}/install_golint.sh -b $GOPATH/bin v1.12.2
+	${DIR}/install_golint.sh -b $GOPATH/bin v1.17.1
 fi
 
 golangci-lint run \
 	--no-config \
 	-E goconst \
 	-E goimports \
+	-E gocritic \
 	-E golint \
 	-E interfacer \
 	-E maligned \
 	-E misspell \
+	-E stylecheck \
 	-E unconvert \
 	-E unparam \
 	-D errcheck \

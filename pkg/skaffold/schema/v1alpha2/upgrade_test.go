@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,47 +19,60 @@ package v1alpha2
 import (
 	"testing"
 
-	next "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1alpha3"
-	"github.com/GoogleContainerTools/skaffold/testutil"
 	yaml "gopkg.in/yaml.v2"
+
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1alpha3"
+	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
-func TestPipelineUpgrade(t *testing.T) {
-	tests := []struct {
-		name     string
-		yaml     string
-		expected *next.SkaffoldPipeline
-	}{
-		{
-			name: "helm release values file",
-			yaml: `apiVersion: skaffold/v1alpha2
+func TestUpgrade_helmReleaseValuesFile(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha2
 kind: Config
 deploy:
   helm:
     releases:
     - name: test release
       valuesFilePath: values.yaml
-`,
-			expected: &next.SkaffoldPipeline{
-				APIVersion: next.Version,
-				Kind:       "Config",
-				Deploy: next.DeployConfig{
-					DeployType: next.DeployType{
-						HelmDeploy: &next.HelmDeploy{
-							Releases: []next.HelmRelease{
-								{
-									Name:        "test release",
-									ValuesFiles: []string{"values.yaml"},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "normal skaffold yaml with kaniko",
-			yaml: `apiVersion: skaffold/v1alpha2
+`
+	expected := `apiVersion: skaffold/v1alpha3
+kind: Config
+deploy:
+  helm:
+    releases:
+    - name: test release
+      valuesFiles:
+      - values.yaml
+`
+	verifyUpgrade(t, yaml, expected)
+}
+
+func TestUpgrade_helmReleaseValuesFileWithProfile(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha2
+kind: Config
+profiles:
+- name: test
+  deploy:
+    helm:
+      releases:
+      - name: test
+        valuesFilePath: values.yaml
+`
+	expected := `apiVersion: skaffold/v1alpha3
+kind: Config
+profiles:
+- name: test
+  deploy:
+    helm:
+      releases:
+      - name: test
+        valuesFiles:
+        - values.yaml
+`
+	verifyUpgrade(t, yaml, expected)
+}
+
+func TestUpgrade_kanikoWithProfile(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha2
 kind: Config
 build:
   artifacts:
@@ -80,74 +93,69 @@ profiles:
       kubectl:
         manifests:
         - k8s-*
-`,
-			expected: &next.SkaffoldPipeline{
-				APIVersion: next.Version,
-				Kind:       "Config",
-				Build: next.BuildConfig{
-					TagPolicy: next.TagPolicy{},
-					Artifacts: []*next.Artifact{
-						{
-							ImageName:    "gcr.io/k8s-skaffold/skaffold-example",
-							ArtifactType: next.ArtifactType{},
-						},
-					},
-					BuildType: next.BuildType{
-						KanikoBuild: &next.KanikoBuild{
-							PullSecret: "/a/secret/path/kaniko.json",
-							BuildContext: next.KanikoBuildContext{
-								GCSBucket: "k8s-skaffold",
-							},
-						},
-					},
-				},
-				Deploy: next.DeployConfig{
-					DeployType: next.DeployType{
-						KubectlDeploy: &next.KubectlDeploy{
-							Manifests: []string{
-								"k8s-*",
-							},
-						},
-					},
-				},
-				Profiles: []next.Profile{
-					{
-						Name: "test profile",
-						Build: next.BuildConfig{
-							TagPolicy: next.TagPolicy{},
-							Artifacts: []*next.Artifact{
-								{
-									ImageName:    "gcr.io/k8s-skaffold/skaffold-example",
-									ArtifactType: next.ArtifactType{},
-								},
-							},
-						},
-						Deploy: next.DeployConfig{
-							DeployType: next.DeployType{
-								KubectlDeploy: &next.KubectlDeploy{
-									Manifests: []string{
-										"k8s-*",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
+`
+	expected := `apiVersion: skaffold/v1alpha3
+kind: Config
+build:
+  artifacts:
+  - imageName: gcr.io/k8s-skaffold/skaffold-example
+  kaniko:
+    buildContext:
+      gcsBucket: k8s-skaffold
+    pullSecret: /a/secret/path/kaniko.json
+deploy:
+  kubectl:
+    manifests:
+    - k8s-*
+profiles:
+  - name: test profile
+    build:
+      artifacts:
+      - imageName: gcr.io/k8s-skaffold/skaffold-example
+    deploy:
+      kubectl:
+        manifests:
+        - k8s-*
+`
+	verifyUpgrade(t, yaml, expected)
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pipeline := NewSkaffoldPipeline()
-			err := yaml.UnmarshalStrict([]byte(tt.yaml), pipeline)
-			if err != nil {
-				t.Fatalf("unexpected error during parsing old config: %v", err)
-			}
+func TestUpgrade_helmReleaseOverrides(t *testing.T) {
+	yaml := `apiVersion: skaffold/v1alpha2
+kind: Config
+deploy:
+  helm:
+    releases:
+    - name: test release
+      overrides:
+        global:
+          localstack:
+            enabled: true
+`
+	expected := `apiVersion: skaffold/v1alpha3
+kind: Config
+deploy:
+  helm:
+    releases:
+    - name: test release
+      overrides:
+        global:
+          localstack:
+            enabled: true
+`
+	verifyUpgrade(t, yaml, expected)
+}
 
-			upgraded, err := pipeline.Upgrade()
+func verifyUpgrade(t *testing.T, input, output string) {
+	config := NewSkaffoldConfig()
+	err := yaml.UnmarshalStrict([]byte(input), config)
+	testutil.CheckErrorAndDeepEqual(t, false, err, Version, config.GetVersion())
 
-			testutil.CheckErrorAndDeepEqual(t, false, err, tt.expected, upgraded)
-		})
-	}
+	upgraded, err := config.Upgrade()
+	testutil.CheckError(t, false, err)
+
+	expected := v1alpha3.NewSkaffoldConfig()
+	err = yaml.UnmarshalStrict([]byte(output), expected)
+
+	testutil.CheckErrorAndDeepEqual(t, false, err, expected, upgraded)
 }

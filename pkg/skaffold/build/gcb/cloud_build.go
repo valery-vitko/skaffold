@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Skaffold Authors
+Copyright 2019 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,9 +29,9 @@ import (
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/gcp"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/sources"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/version"
 	"github.com/pkg/errors"
@@ -43,11 +43,11 @@ import (
 )
 
 // Build builds a list of artifacts with Google Cloud Build.
-func (b *Builder) Build(ctx context.Context, out io.Writer, tagger tag.Tagger, artifacts []*latest.Artifact) ([]build.Artifact, error) {
-	return build.InParallel(ctx, out, tagger, artifacts, b.buildArtifact)
+func (b *Builder) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact) ([]build.Artifact, error) {
+	return build.InParallel(ctx, out, tags, artifacts, b.buildArtifactWithCloudBuild)
 }
 
-func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, tagger tag.Tagger, artifact *latest.Artifact) (string, error) {
+func (b *Builder) buildArtifactWithCloudBuild(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
 	client, err := google.DefaultClient(ctx, cloudbuild.CloudPlatformScope)
 	if err != nil {
 		return "", errors.Wrap(err, "getting google client")
@@ -85,12 +85,21 @@ func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, tagger tag.T
 		return "", errors.Wrap(err, "checking bucket is in correct project")
 	}
 
+	desc, err := b.buildDescription(artifact, tag, cbBucket, buildObject)
+	if err != nil {
+		return "", errors.Wrap(err, "could not create build description")
+	}
+
+	dependencies, err := b.DependenciesForArtifact(ctx, artifact)
+	if err != nil {
+		return "", errors.Wrapf(err, "getting dependencies for %s", artifact.ImageName)
+	}
+
 	color.Default.Fprintf(out, "Pushing code to gs://%s/%s\n", cbBucket, buildObject)
-	if err := docker.UploadContextToGCS(ctx, artifact.Workspace, artifact.DockerArtifact, cbBucket, buildObject); err != nil {
+	if err := sources.UploadToGCS(ctx, artifact, cbBucket, buildObject, dependencies); err != nil {
 		return "", errors.Wrap(err, "uploading source tarball")
 	}
 
-	desc := b.buildDescription(artifact, cbBucket, buildObject)
 	call := cbclient.Projects.Builds.Create(projectID, desc)
 	op, err := call.Context(ctx).Do()
 	if err != nil {
@@ -103,7 +112,8 @@ func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, tagger tag.T
 	}
 	logsObject := fmt.Sprintf("log-%s.txt", remoteID)
 	color.Default.Fprintf(out, "Logs are available at \nhttps://console.cloud.google.com/m/cloudstorage/b/%s/o/%s\n", cbBucket, logsObject)
-	var imageID string
+
+	var digest string
 	offset := int64(0)
 watch:
 	for {
@@ -128,7 +138,7 @@ watch:
 		switch cb.Status {
 		case StatusQueued, StatusWorking, StatusUnknown:
 		case StatusSuccess:
-			imageID, err = getImageID(cb)
+			digest, err = getDigest(cb)
 			if err != nil {
 				return "", errors.Wrap(err, "getting image id from finished build")
 			}
@@ -146,23 +156,8 @@ watch:
 		return "", errors.Wrap(err, "cleaning up source tar after build")
 	}
 	logrus.Infof("Deleted object %s", buildObject)
-	builtTag := fmt.Sprintf("%s@%s", artifact.ImageName, imageID)
-	logrus.Infof("Image built at %s", builtTag)
 
-	newTag, err := tagger.GenerateFullyQualifiedImageName(artifact.Workspace, &tag.Options{
-		ImageName: artifact.ImageName,
-		Digest:    imageID,
-	})
-
-	if err != nil {
-		return "", errors.Wrap(err, "generating tag")
-	}
-
-	if err := docker.AddTag(builtTag, newTag); err != nil {
-		return "", errors.Wrap(err, "tagging image")
-	}
-
-	return newTag, nil
+	return tag + "@" + digest, nil
 }
 
 func getBuildID(op *cloudbuild.Operation) (string, error) {
@@ -179,7 +174,7 @@ func getBuildID(op *cloudbuild.Operation) (string, error) {
 	return buildMeta.Build.Id, nil
 }
 
-func getImageID(b *cloudbuild.Build) (string, error) {
+func getDigest(b *cloudbuild.Build) (string, error) {
 	if b.Results == nil || len(b.Results.Images) == 0 {
 		return "", errors.New("build failed")
 	}
